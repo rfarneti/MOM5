@@ -1,15 +1,24 @@
 #!/bin/csh -f
 # Minimal compile script for fully coupled model CM2M experiments
 
-set platform      = gfortran    # A unique identifier for your platfo
+set platform      = gfortran    # A unique identifier for your platform
                                 # This corresponds to the mkmf templates in $root/bin dir.
 set type          = MOM_solo    # Type of the experiment
 set unit_testing = 0
 set help = 0
 set debug = 0
+set repro = 0
 set use_netcdf4 = 0
+set environ = 1
+set cosima_version = unset
 
-set argv = (`getopt -u -o h -l type: -l platform: -l help -l unit_testing -l debug -l use_netcdf4 --  $*`)
+
+set argv = (`getopt -u -o h -l type: -l platform: -l help -l unit_testing -l debug -l repro -l use_netcdf4 -l no_environ -l no_version --  $*`)
+if ($status != 0) then
+  # Die if there are incorrect options
+  set help = 1
+  goto help
+endif
 while ("$argv[1]" != "--")
     switch ($argv[1])
         case --type:
@@ -20,8 +29,14 @@ while ("$argv[1]" != "--")
                 set unit_testing = 1; breaksw
         case --debug:
                 set debug = 1; breaksw
+        case --repro:
+                set repro = 1; breaksw
         case --use_netcdf4:
                 set use_netcdf4 = 1; breaksw
+        case --no_environ:
+                set environ = 0; breaksw
+        case --no_version:
+                set cosima_version = 0; breaksw
         case --help:
                 set help = 1;  breaksw
         case -h:
@@ -30,6 +45,7 @@ while ("$argv[1]" != "--")
     shift argv
 end
 shift argv
+help:
 if ( $help ) then
     echo "The optional arguments are:"
     echo "--type       followed by the type of the model, one of the following (default is MOM_solo):"
@@ -41,10 +57,18 @@ if ( $help ) then
     echo "             EBM       : ocean-seaice-land-atmosphere coupled model with energy balance atmosphere"
     echo "             ACCESS-CM : ocean component of ACCESS-CM model."
     echo "             ACCESS-OM : ocean component of ACCESS-OM model."
+    echo "             ACCESS-ESM : ocean component of ACCESS-ESM model with CSIRO BGC  (Wombat)."
+    echo "             ACCESS-OM-BGC: ocean component of ACCESS-OM model with CSIRO BGC  (Wombat)."
     echo
-    echo "--platform   followed by the platform name that has a corresponfing environ file in the ../bin dir, default is gfortran"
+    echo "--platform   followed by the platform name that has a corresponding environ file in the ../bin dir, default is gfortran"
+    echo
+    echo "--debug      make a debugging build"
     echo
     echo "--use_netcdf4  use NetCDF4, the default is NetCDF4. Warning: many of the standard experiments don't work with NetCDF4."
+    echo
+    echo "--no_environ do not source platform specific environment. Allows customising/overriding default environment"
+    echo
+    echo "--no_version disable COSIMA specific versioning for ACCESS-OM* builds"
     echo
     exit 1
 endif
@@ -68,12 +92,25 @@ if($static) then
   set cppDefs = "$cppDefs -DMOM_STATIC_ARRAYS -DNI_=360 -DNJ_=200 -DNK_=50 -DNI_LOCAL_=60 -DNJ_LOCAL_=50"
 endif
 
+if( $cosima_version == "unset" ) then
+    if( $type =~ ACCESS-OM* ) then
+        # default to cosima versioning for ACCESS-OM if not set explicitly as no_version argument
+        set cosima_version = 1
+    else
+        set cosima_version = 0
+    endif
+endif
+
 if ( $type == EBM ) then
     set cppDefs  = ( "-Duse_netCDF -Duse_netCDF3 -Duse_libMPI -DLAND_BND_TRACERS -DOVERLOAD_C8 -DOVERLOAD_C4 -DOVERLOAD_R4" )
 else if( $type == ACCESS-OM ) then
-    set cppDefs  = ( "-Duse_netCDF -Duse_libMPI -DACCESS" )
+    set cppDefs  = ( "-Duse_netCDF -Duse_libMPI -DACCESS_OM" )
+else if( $type == ACCESS-OM-BGC ) then
+    set cppDefs  = ( "-Duse_netCDF -Duse_libMPI -DACCESS_OM -DCSIRO_BGC" )
 else if( $type == ACCESS-CM ) then
-    set cppDefs  = ( "-Duse_netCDF -Duse_libMPI -DACCESS -DACCESS_CM" )
+    set cppDefs  = ( "-Duse_netCDF -Duse_libMPI -DACCESS_CM" )
+else if( $type == ACCESS-ESM ) then
+    set cppDefs  = ( "-Duse_netCDF -Duse_libMPI -DACCESS_CM -DCSIRO_BGC" )
 endif
 
 if ( $unit_testing ) then
@@ -85,6 +122,10 @@ if ( $debug ) then
     setenv DEBUG true
 endif
 
+if ( $repro ) then
+    setenv REPRO true
+endif
+
 if ( $use_netcdf4 ) then
     set cppDefs = `echo $cppDefs | sed -e 's/-Duse_netCDF3//g'`
     set cppDefs = "$cppDefs -Duse_netCDF4"
@@ -93,7 +134,9 @@ endif
 #
 # Users must ensure the correct environment file exists for their platform.
 #
-source $root/bin/environs.$platform  # environment variables and loadable modules
+if ( $environ ) then
+  source $root/bin/environs.$platform  # environment variables and loadable modules
+endif
 
 #
 # compile mppnccombine.c, needed only if $npes > 1
@@ -104,16 +147,28 @@ endif
 set mkmf_lib = "$mkmf -f -m Makefile -a $code_dir -t $mkmfTemplate"
 set lib_include_dirs = "$root/include $code_dir/shared/include $code_dir/shared/mpp/include"
 
+if ( $cosima_version ) then
+    echo "Including COSIMA version in build"
+    # Build version. This prevents builds outside a git repo, so only enabled for COSIMA builds
+    source ./version_compile.csh
+    set cppDefs = "$cppDefs -DCOSIMA_VERSION"
+endif
+
 # Build FMS.
 source ./FMS_compile.csh
+
 set includes = "-I$code_dir/shared/include -I$executable:h:h/lib_FMS -I$executable:h:h/lib_ocean"
+
+if ( $cosima_version ) then
+    set includes = "$includes -I$executable:h:h/lib_version/"
+endif
 
 # Build the core ocean.
 cd $root/exp
 source ./ocean_compile.csh
 if ( $status ) exit $status
 
-if( $type != MOM_solo && $type != ACCESS-OM  && $type != ACCESS-CM) then
+if( $type != MOM_solo && $type != ACCESS-OM  && $type != ACCESS-CM && $type != ACCESS-OM-BGC  && $type != ACCESS-ESM) then
     cd $root/exp
     source ./ice_compile.csh
     if ( $status ) exit $status
@@ -165,35 +220,47 @@ cd $executable:h
 if( $type == MOM_solo ) then
     set srcList = ( mom5/drivers )
     set libs = "$executable:h:h/lib_ocean/lib_ocean.a $executable:h:h/lib_FMS/lib_FMS.a"
-else if( $type == ACCESS-OM || $type == ACCESS-CM ) then
-    set srcList = ( access_coupler )
-    set includes = "-I$executable:h:h/lib_FMS -I$executable:h:h/$type/lib_ocean" 
-    set libs = "$executable:h:h/$type/lib_ocean/lib_ocean.a $executable:h:h/lib_FMS/lib_FMS.a"
+else if( $type == ACCESS-CM || $type == ACCESS-ESM) then
+    set srcList = ( accesscm_coupler )
+    set includes = "-I$executable:h:h/lib_FMS -I$executable:h:h/$type/lib_ocean"
+    set libs = "$executable:h:h/$type/lib_ocean/lib_ocean.a"
     setenv OASIS true
+else if( $type == ACCESS-OM || $type == ACCESS-OM-BGC) then
+    set srcList = ( accessom_coupler )
+    set includes = "-I$executable:h:h/lib_FMS -I$executable:h:h/$type/lib_ocean"
+    set libs = "$executable:h:h/$type/lib_ocean/lib_ocean.a $executable:h:h/lib_FMS/lib_FMS.a"
 else if( $type == MOM_SIS ) then
     set srcList = ( coupler )
     set includes = "$includes -I$executable:h:h/lib_ice -I$executable:h:h/lib_atmos_null -I$executable:h:h/lib_land_null"
-    set libs = "$executable:h:h/lib_ocean/lib_ocean.a $executable:h:h/lib_ice/lib_ice.a $executable:h:h/lib_atmos_null/lib_atmos_null.a $executable:h:h/lib_land_null/lib_land_null.a $executable:h:h/lib_FMS/lib_FMS.a"
+    set libs = "$executable:h:h/lib_ocean/lib_ocean.a $executable:h:h/lib_ice/lib_ice.a $executable:h:h/lib_atmos_null/lib_atmos_null.a $executable:h:h/lib_land_null/lib_land_null.a"
 else if( $type == EBM ) then
     set srcList = ( coupler )
     set includes = "$includes -I$executable:h:h/lib_ice -I$executable:h:h/lib_atmos_ebm  -I$executable:h:h/lib_land_lad"
-    set libs = "$executable:h:h/lib_ocean/lib_ocean.a $executable:h:h/lib_ice/lib_ice.a $executable:h:h/lib_atmos_ebm/lib_atmos_ebm.a $executable:h:h/lib_land_lad/lib_land_lad.a $executable:h:h/lib_FMS/lib_FMS.a"
+    set libs = "$executable:h:h/lib_ocean/lib_ocean.a $executable:h:h/lib_ice/lib_ice.a $executable:h:h/lib_atmos_ebm/lib_atmos_ebm.a $executable:h:h/lib_land_lad/lib_land_lad.a"
 else if( $type == CM2M ) then
     set srcList = ( coupler )
     set includes = "$includes -I$executable:h:h/lib_ice -I$executable:h:h/lib_atmos_fv -I$executable:h:h/lib_atmos_phys -I$executable:h:h/lib_land_lad"
-    set libs = "$executable:h:h/lib_ocean/lib_ocean.a $executable:h:h/lib_ice/lib_ice.a $executable:h:h/lib_atmos_fv/lib_atmos_fv.a $executable:h:h/lib_atmos_phys/lib_atmos_phys.a $executable:h:h/lib_land_lad/lib_land_lad.a $executable:h:h/lib_FMS/lib_FMS.a"
+    set libs = "$executable:h:h/lib_ocean/lib_ocean.a $executable:h:h/lib_ice/lib_ice.a $executable:h:h/lib_atmos_fv/lib_atmos_fv.a $executable:h:h/lib_atmos_phys/lib_atmos_phys.a $executable:h:h/lib_land_lad/lib_land_lad.a"
 else if( $type == ESM2M ) then
     set srcList = ( coupler )
     set includes = "$includes -I$executable:h:h/lib_ice -I$executable:h:h/lib_atmos_fv -I$executable:h:h/lib_atmos_phys -I$executable:h:h/lib_land_lad2"
-    set libs = "$executable:h:h/lib_ocean/lib_ocean.a $executable:h:h/lib_ice/lib_ice.a $executable:h:h/lib_atmos_fv/lib_atmos_fv.a $executable:h:h/lib_atmos_phys/lib_atmos_phys.a $executable:h:h/lib_land_lad2/lib_land_lad2.a $executable:h:h/lib_FMS/lib_FMS.a"
+    set libs = "$executable:h:h/lib_ocean/lib_ocean.a $executable:h:h/lib_ice/lib_ice.a $executable:h:h/lib_atmos_fv/lib_atmos_fv.a $executable:h:h/lib_atmos_phys/lib_atmos_phys.a $executable:h:h/lib_land_lad2/lib_land_lad2.a"
 else if( $type == ICCM ) then
     set srcList = ( coupler )
     set includes = "$includes -I$executable:h:h/lib_ice -I$executable:h:h/lib_atmos_bg -I$executable:h:h/lib_atmos_phys -I$executable:h:h/lib_land_lad" 
-    set libs = "$executable:h:h/lib_ocean/lib_ocean.a $executable:h:h/lib_ice/lib_ice.a $executable:h:h/lib_atmos_bg/lib_atmos_bg.a $executable:h:h/lib_atmos_phys/lib_atmos_phys.a $executable:h:h/lib_land_lad/lib_land_lad.a $executable:h:h/lib_FMS/lib_FMS.a"
+    set libs = "$executable:h:h/lib_ocean/lib_ocean.a $executable:h:h/lib_ice/lib_ice.a $executable:h:h/lib_atmos_bg/lib_atmos_bg.a $executable:h:h/lib_atmos_phys/lib_atmos_phys.a $executable:h:h/lib_land_lad/lib_land_lad.a"
 else
     echo "Error: unsupported model type, please see model types in ./MOM_compile.sh --help"
     exit 1
 endif
+
+# Always include FMS
+set libs = "$libs $executable:h:h/lib_FMS/lib_FMS.a"
+
+if ( $cosima_version ) then
+    set libs = "$libs $executable:h:h/lib_version/lib_version.a"
+endif
+
 $mkmf_exec -o "$includes" -c "$cppDefs" -l "$libs"  $srcList
 make
 if( $status ) then

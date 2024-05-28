@@ -126,12 +126,13 @@ use ocean_types_mod,      only: ocean_grid_type, ocean_domain_type, ocean_thickn
 use ocean_types_mod,      only: ocean_time_type, ocean_time_steps_type, ocean_options_type
 use ocean_types_mod,      only: ocean_prog_tracer_type, ocean_diag_tracer_type, ocean_density_type
 use ocean_workspace_mod,  only: wrk1_2d, wrk1
-use ocean_util_mod,       only: diagnose_2d, diagnose_3d
+use ocean_util_mod,       only: diagnose_2d, diagnose_3d, diagnose_sum
 
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
 use auscom_ice_parameters_mod, only: pop_icediag, do_ice
 use auscom_ice_mod,            only: AQICE
 use auscom_ice_mod,            only: auscom_ice_formation_new
+use auscom_ice_mod,            only: auscom_ice_formation_new_redist
 use diag_manager_mod,          only: send_data
 #endif
 
@@ -152,6 +153,11 @@ type(ocean_domain_type), pointer :: Dom =>NULL()
 integer :: index_frazil=-1
 integer :: index_temp=-1
 integer :: index_salt=-1
+
+! for FAFMIP heat tracers 
+integer :: index_frazil_redist=-1
+integer :: index_redist_heat  =-1
+
 integer :: tendency
 real    :: dtimer
 real    :: cp_ocean_r
@@ -160,7 +166,12 @@ real    :: cp_ocean_r
 logical :: used
 integer :: id_frazil_2d=-1
 integer :: id_frazil_3d=-1
+integer :: id_frazil_3d_int_z=-1
+integer :: id_total_ocean_frazil=-1
 integer :: id_temp_freeze=-1
+! for FAFMIP heat tracers 
+integer :: id_frazil_redist_2d=-1
+integer :: id_frazil_redist_3d=-1
 
 ! for ascii output
 integer :: unit=6
@@ -202,6 +213,7 @@ real,parameter  ::  v22 =  1.242891021876471d0
 
 public compute_frazil_heating
 public ocean_frazil_init
+private compute_frazil_redist_heating 
 
 ! nml defaults 
 logical :: use_this_module         = .false.
@@ -227,7 +239,7 @@ contains
 ! </DESCRIPTION>
 !
 subroutine ocean_frazil_init (Domain, Grid, Time, Time_steps, Ocean_options, &
-                              itemp, isalt, debug)  
+                              itemp, isalt, iredist, debug)  
    
   type(ocean_domain_type),     intent(in), target   :: Domain
   type(ocean_grid_type),       intent(in), target   :: Grid
@@ -236,6 +248,7 @@ subroutine ocean_frazil_init (Domain, Grid, Time, Time_steps, Ocean_options, &
   type(ocean_options_type),    intent(inout)        :: Ocean_options
   integer,                     intent(in)           :: itemp
   integer,                     intent(in)           :: isalt
+  integer,                     intent(in)           :: iredist 
   logical,                     intent(in), optional :: debug
 
   integer :: ierr, ioun, io_status
@@ -341,11 +354,27 @@ subroutine ocean_frazil_init (Domain, Grid, Time, Time_steps, Ocean_options, &
      min_range=-10.0, max_range=100.0, const_init_tracer=.true.,const_init_value=0.0, &
      restart_file='ocean_frazil.res.nc' )
 
-  tendency   = Time_steps%tendency
-  dtimer     = 1.0/(Time_steps%dtime_t + epsln)
-  cp_ocean_r = 1.0/cp_ocean
-  index_salt = isalt
-  index_temp = itemp
+  ! The diagnostic tracer "frazil_redist" is only used for FAFMIP simulations.  
+  if(iredist > 0) then
+    write(stdoutunit,'(a)') &
+    'Initializing frazil_redist heat diagnostic tracer for FAFMIP purposes.'
+    index_frazil_redist = otpm_set_diag_tracer('frazil_redist',                         &
+       caller='ocean_frazil_mod/ocean_frazil_init',                                     &
+       longname='frazil redistributed heat field heating', units='J/m^2',               &
+       conversion=1.0, offset=0.0, min_tracer=0.0, max_tracer=1.e20,                    &
+       min_range=-10.0, max_range=100.0, const_init_tracer=.true.,const_init_value=0.0, &
+       restart_file='ocean_frazil_redist.res.nc' )
+  else
+    write(stdoutunit,'(a)') &
+          'NOT Initializing frazil_redist heat diagnostic tracer for FAFMIP purposes.'
+  endif
+
+  tendency          = Time_steps%tendency
+  dtimer            = 1.0/(Time_steps%dtime_t + epsln)
+  cp_ocean_r        = 1.0/cp_ocean
+  index_salt        = isalt
+  index_temp        = itemp
+  index_redist_heat = iredist 
 
   Grd => Grid
   Dom => Domain
@@ -445,14 +474,28 @@ subroutine ocean_frazil_init (Domain, Grid, Time, Time_steps, Ocean_options, &
 
   ! when ice forms only in k=1 cell, only require frazil saved as 2d field 
   id_frazil_2d = register_diag_field ('ocean_model', 'frazil_2d', Grd%tracer_axes(1:2), &
-         Time%model_time, 'ocn frazil heat flux over time step', 'W/m^2',&
+         Time%model_time, 'ocn frazil heat flux from the top level over time step', 'W/m^2', &
          missing_value=missing_value, range=(/-1.e10,1.e10/))  
 
   ! when ice forms at any depth, require frazil to be saved as 3d field
   id_frazil_3d = register_diag_field ('ocean_model', 'frazil_3d', Grd%tracer_axes(1:3), &
-         Time%model_time, 'ocn frazil heat flux over time step', 'W/m^2',&
+         Time%model_time, 'ocn frazil heat flux over time step', 'W/m^2',               &
          missing_value=missing_value, range=(/-1.e10,1.e10/))  
+  id_frazil_3d_int_z = register_diag_field ('ocean_model', 'frazil_3d_int_z', Grd%tracer_axes(1:2), &
+         Time%model_time, 'Vertical sum of ocn frazil heat flux over time step', 'W/m^2', &
+         missing_value=missing_value, range=(/-1.e10,1.e10/))
+  id_total_ocean_frazil = register_diag_field ('ocean_model', 'total_ocean_frazil', &
+         Time%model_time, 'total ocean heating from frazil', 'Watts/1e15', &
+         missing_value=missing_value, range=(/-1.e4,1.e4/))
 
+  ! for FAFMIP frazil diagnostic tracer 
+  id_frazil_redist_2d = register_diag_field ('ocean_model','frazil_redist_2d',Grd%tracer_axes(1:2), &
+        Time%model_time, 'ocn frazil redist heat flux over time step (for FAFMIP)', 'W/m^2',        &
+        missing_value=missing_value, range=(/-1.e10,1.e10/))
+  id_frazil_redist_3d = register_diag_field ('ocean_model', 'frazil_redist_3d', Grd%tracer_axes(1:3), &
+         Time%model_time, 'ocn frazil heat flux over time step (for FAFMIP)', 'W/m^2',                &
+         missing_value=missing_value, range=(/-1.e10,1.e10/))  
+   
   id_temp_freeze = register_diag_field ('ocean_model', 'temp_freeze', Grd%tracer_axes(1:3), &
          Time%model_time, 'freezing temperature of seawater', 'deg C',                      &
          missing_value=missing_value, range=(/-1.e10,1.e10/))  
@@ -489,10 +532,16 @@ subroutine compute_frazil_heating (Time, Thickness, Dens, T_prog, T_diag)
   real     :: s, sqrts
   real     :: press 
 
-  if(.not. use_this_module) return 
+  if(.not. use_this_module) return
 
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
   if (pop_icediag) then
+!In FAFMIP runs we need to call this routine first as it is possibe to change
+!the salinity.
+    if(index_frazil_redist > 0) then
+     call compute_frazil_redist_heating(Time, Thickness, Dens, T_prog, T_diag)
+    endif 
+
     if ( do_ice ) then
       T_diag(index_frazil)%field = 0.0
       call auscom_ice_formation_new(Time,T_prog,Thickness, T_diag(index_frazil) )
@@ -508,7 +557,22 @@ subroutine compute_frazil_heating (Time, Thickness, Dens, T_prog, T_diag)
            Time%model_time, rmask=Grd%tmask(:,:,:), &
            is_in=isc, js_in=jsc, ks_in=1, ie_in=iec, je_in=jec, ke_in=nk)
     endif
-  
+
+    if (id_frazil_3d_int_z > 0 .or. id_total_ocean_frazil > 0) then
+       wrk1_2d(:,:) = 0.0
+       do k=1,nk
+          wrk1_2d(:,:) = wrk1_2d(:,:) +  T_diag(index_frazil)%field(:,:,k)*dtimer
+       enddo
+       if (id_frazil_3d_int_z > 0) then
+          used = send_data(id_frazil_3d_int_z, wrk1_2d(:,:), &
+               Time%model_time, rmask=Grd%tmask(:,:,1), &
+               is_in=isc, js_in=jsc, ie_in=iec, je_in=jec)
+       endif
+       if (id_total_ocean_frazil > 0) then
+        call diagnose_sum(Time, Grd, Dom, id_total_ocean_frazil, wrk1_2d, 1e-15)
+       endif
+    endif
+
     return
   endif
 #endif
@@ -518,7 +582,7 @@ subroutine compute_frazil_heating (Time, Thickness, Dens, T_prog, T_diag)
 
   if(freezing_temp_simple) then 
 
-      k=1
+     k=1
       do j=jsc,jec
          do i=isc,iec 
             T_diag(index_frazil)%field(i,j,k) = 0.0
@@ -531,13 +595,13 @@ subroutine compute_frazil_heating (Time, Thickness, Dens, T_prog, T_diag)
                     T_prog(index_temp)%field(i,j,k,taup1) = tfreeze
                 endif
             endif
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
             AQICE(i,j)=AQICE(i,j) - T_diag(index_frazil)%field(i,j,k)
             !'-' is required in routine ice_heatflux for merge operation.
 #endif
          enddo
       enddo
-
+      
   elseif(freezing_temp_preteos10) then  
 
       if(frazil_only_in_surface) then 
@@ -558,7 +622,7 @@ subroutine compute_frazil_heating (Time, Thickness, Dens, T_prog, T_diag)
                         T_prog(index_temp)%field(i,j,k,taup1) = tfreeze
                     endif
                 endif
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
                 AQICE(i,j)=AQICE(i,j) - T_diag(index_frazil)%field(i,j,1)
                 !'-' is required in routine ice_heatflux for merge operation.
 #endif
@@ -566,7 +630,7 @@ subroutine compute_frazil_heating (Time, Thickness, Dens, T_prog, T_diag)
           enddo
 
       else 
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
        do j=jsc,jec
              do i=isc,iec
                 do k=1,nk
@@ -590,7 +654,7 @@ subroutine compute_frazil_heating (Time, Thickness, Dens, T_prog, T_diag)
                            T_prog(index_temp)%field(i,j,k,taup1) = tfreeze
                        endif
                    endif
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
                    AQICE(i,j)=AQICE(i,j) - T_diag(index_frazil)%field(i,j,k)
                    !'-' is required in routine ice_heatflux for merge operation.
 #endif
@@ -660,6 +724,18 @@ subroutine compute_frazil_heating (Time, Thickness, Dens, T_prog, T_diag)
   if (id_frazil_3d > 0) then
      call diagnose_3d(Time, Grd, id_frazil_3d, T_diag(index_frazil)%field(:,:,:)*dtimer)
   endif
+  if (id_frazil_3d_int_z > 0 .or. id_total_ocean_frazil > 0) then
+     wrk1_2d(:,:) = 0.0
+     do k=1,nk
+        wrk1_2d(:,:) = wrk1_2d(:,:) +  T_diag(index_frazil)%field(:,:,k)*dtimer
+     enddo
+     if (id_frazil_3d_int_z > 0) then
+        call diagnose_2d(Time, Grd, id_frazil_3d_int_z, wrk1_2d(:,:))
+     end if
+     if (id_total_ocean_frazil > 0) then
+        call diagnose_sum(Time, Grd, Dom, id_total_ocean_frazil, wrk1_2d, 1e-15)
+     end if
+  endif
 
   if(id_temp_freeze > 0) then 
      wrk1(:,:,:) =0.0
@@ -690,11 +766,210 @@ subroutine compute_frazil_heating (Time, Thickness, Dens, T_prog, T_diag)
      call diagnose_3d(Time, Grd, id_temp_freeze, wrk1(:,:,:))
   endif
 
-
-  
+  if(index_frazil_redist > 0) then
+     call compute_frazil_redist_heating(Time, Thickness, Dens, T_prog, T_diag)
+  endif 
 
 end subroutine compute_frazil_heating
 ! </SUBROUTINE> NAME="compute_frazil_heating">
+
+
+!#######################################################################
+! <SUBROUTINE NAME="compute_frazil_redist_heating">
+!
+! <DESCRIPTION>
+! Compute ocean heating due to formation of frazil-ice (Joules/m^2)
+! for the FAFMIP redistributed heat tracer.  
+!
+! Note that "frazil_factor" accounts for possibly different time 
+! stepping used in ocean model and the sea ice model.  With MOM 
+! using a leap-frog, and the GFDL ocean model SIS using forward,
+! then frazil_factor=0.5. If use recommended tendency=twolevel 
+! in MOM, then frazil_factor=1.0
+!
+! Note: unsure if the ACCESS ifedf options have been properly
+! handled. Need ACCESS developers to check.  
+! </DESCRIPTION>
+!
+subroutine compute_frazil_redist_heating (Time, Thickness, Dens, T_prog, T_diag)
+
+  type(ocean_time_type),        intent(in)    :: Time 
+  type(ocean_thickness_type),   intent(in)    :: Thickness
+  type(ocean_density_type),     intent(in)    :: Dens
+  type(ocean_prog_tracer_type), intent(inout) :: T_prog(:)
+  type(ocean_diag_tracer_type), intent(inout) :: T_diag(:)
+
+  integer  :: i,j,k
+  integer  :: taup1, tau
+  real     :: tf_num, tf_den, tfreeze
+  real     :: s, sqrts
+  real     :: press 
+
+  if(.not. use_this_module) return 
+
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
+  if (pop_icediag) then
+    if ( do_ice ) then
+      T_diag(index_frazil_redist)%field = 0.0
+!Saliniy is unchanged on return from this routine. 
+      call auscom_ice_formation_new_redist(Time,T_prog,Thickness, T_diag(index_frazil_redist) )
+    endif
+    T_diag(index_frazil_redist)%field=T_diag(index_frazil_redist)%field * Grd%tmask
+    if (id_frazil_redist_2d > 0) then 
+      used = send_data(id_frazil_redist_2d, T_diag(index_frazil_redist)%field(:,:,1)*dtimer, &
+           Time%model_time, rmask=Grd%tmask(:,:,1), &
+           is_in=isc, js_in=jsc, ie_in=iec, je_in=jec)
+    endif
+    if (id_frazil_redist_3d > 0) then 
+      used = send_data(id_frazil_redist_3d, T_diag(index_frazil_redist)%field(:,:,:)*dtimer, &
+           Time%model_time, rmask=Grd%tmask(:,:,:), &
+           is_in=isc, js_in=jsc, ks_in=1, ie_in=iec, je_in=jec, ke_in=nk)
+    endif
+  
+    return
+  endif
+#endif
+
+  taup1 = Time%taup1
+  tau   = Time%tau
+
+  if(freezing_temp_simple) then 
+
+     k=1
+      do j=jsc,jec
+         do i=isc,iec 
+            T_diag(index_frazil_redist)%field(i,j,k) = 0.0
+            if(Grd%tmask(i,j,k) > 0.0) then 
+                tfreeze = a1*Dens%rho_salinity(i,j,k,taup1)
+                if(T_prog(index_redist_heat)%field(i,j,k,taup1) < tfreeze) then  
+                    T_diag(index_frazil_redist)%field(i,j,k) = &
+                         (tfreeze-T_prog(index_redist_heat)%field(i,j,k,taup1)) &
+                         *Thickness%rho_dzt(i,j,k,taup1)*cp_ocean*frazil_factor 
+                    T_prog(index_redist_heat)%field(i,j,k,taup1) = tfreeze
+                endif
+            endif
+         enddo
+      enddo
+
+  elseif(freezing_temp_preteos10) then  
+
+      if(frazil_only_in_surface) then 
+          k=1     
+          do j=jsc,jec
+             do i=isc,iec 
+                T_diag(index_frazil_redist)%field(i,j,k) = 0.0
+                if(Grd%tmask(i,j,k) > 0.0) then 
+                    s       = T_prog(index_salt)%field(i,j,k,taup1)              
+                    sqrts   = sqrt(s)
+                    tf_num  = a0 + s*(a1 + sqrts*(a2 + sqrts*a3))
+                    tf_den  = b0 + s*s*sqrts*b3 
+                    tfreeze = tf_num/tf_den  + (c1 + s*c2) 
+                    if(T_prog(index_redist_heat)%field(i,j,k,taup1) < tfreeze) then 
+                        T_diag(index_frazil_redist)%field(i,j,k) = &
+                             (tfreeze-T_prog(index_redist_heat)%field(i,j,k,taup1)) &
+                             *Thickness%rho_dzt(i,j,k,taup1)*cp_ocean*frazil_factor 
+                        T_prog(index_redist_heat)%field(i,j,k,taup1) = tfreeze
+                    endif
+                endif
+             enddo
+          enddo
+
+      else 
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
+       do j=jsc,jec
+             do i=isc,iec
+                do k=1,nk
+#else
+          do k=1,nk 
+             do j=jsc,jec
+                do i=isc,iec 
+#endif
+                   T_diag(index_frazil_redist)%field(i,j,k) = 0.0
+                   if(Grd%tmask(i,j,k) > 0.0) then 
+                       s       = Dens%rho_salinity(i,j,k,taup1)
+                       press   = Dens%pressure_at_depth(i,j,k)              
+                       sqrts   = sqrt(s)
+                       tf_num  = a0 + s*(a1 + sqrts*(a2 + sqrts*a3)) + press*(a4 + press*(a5 + s*a6)) 
+                       tf_den  = b0 + press*(b1 + press*b2) + s*s*sqrts*b3 
+                       tfreeze = tf_num/tf_den + (c1 + s*c2) 
+                       if(T_prog(index_redist_heat)%field(i,j,k,taup1) < tfreeze) then 
+                           T_diag(index_frazil_redist)%field(i,j,k) = &
+                                (tfreeze-T_prog(index_redist_heat)%field(i,j,k,taup1)) &
+                                *Thickness%rho_dzt(i,j,k,taup1)*cp_ocean*frazil_factor 
+                           T_prog(index_redist_heat)%field(i,j,k,taup1) = tfreeze
+                       endif
+                   endif
+                enddo
+             enddo
+          enddo
+
+      endif
+
+  else  ! teos10 
+
+      if(frazil_only_in_surface) then 
+          k=1
+          do j=jsc,jec
+             do i=isc,iec
+                T_diag(index_frazil_redist)%field(i,j,k) = 0.0
+                if(Grd%tmask(i,j,k) > 0.0) then
+                    s       = 1.d-2*Dens%rho_salinity(i,j,k,taup1)
+                    sqrts   = sqrt(s)
+                    tfreeze =  v0 &
+                               + s*(v1 + sqrts*(v2 + sqrts*(v3 + sqrts*(v4 + sqrts*(v5 + v6*sqrts)))))  &
+                               - saturation_fraction*(1e-3)*(2.4 - c1*s)*(1 + c2*(1.d0 - s/35.16504d0))
+                    if(T_prog(index_redist_heat)%field(i,j,k,taup1) < tfreeze) then
+                        T_diag(index_frazil_redist)%field(i,j,k) = &
+                             (tfreeze-T_prog(index_redist_heat)%field(i,j,k,taup1)) &
+                             *Thickness%rho_dzt(i,j,k,taup1)*cp_ocean*frazil_factor
+                        T_prog(index_redist_heat)%field(i,j,k,taup1) = tfreeze
+                    endif
+                endif
+             enddo
+          enddo
+
+      else
+
+         do k=1,nk
+            do j=jsc,jec
+               do i=isc,iec
+                  T_diag(index_frazil_redist)%field(i,j,k) = 0.0
+                  if(Grd%tmask(i,j,k) > 0.0) then
+                     s       = 1.d-2*Dens%rho_salinity(i,j,k,taup1)
+                     sqrts   = sqrt(s)
+                     press   = Dens%pressure_at_depth(i,j,k)              
+                     tfreeze =  v0 &
+                                + s*(v1 + sqrts*(v2 + sqrts*(v3 + sqrts*(v4 + sqrts*(v5 + v6*sqrts)))))         &
+                                + press*(v7 + press*(v8 + v9*press))                                            &
+                                + s*press*(v10 + press*(v12 + press*(v15 + v21*s)) + s*(v13 + v17*press+ v19*s) &
+                                + sqrts*(v11 + press*(v14 + v18*press)  + s*(v16 + v20*press+ v22*s)))          &
+                                - saturation_fraction*(1e-3)*(2.4 - c1*s)*(1 + c2*(1d0 - s/35.16504d0))
+                     if(T_prog(index_redist_heat)%field(i,j,k,taup1) < tfreeze) then
+                         T_diag(index_frazil_redist)%field(i,j,k) = &
+                              (tfreeze-T_prog(index_redist_heat)%field(i,j,k,taup1)) &
+                              *Thickness%rho_dzt(i,j,k,taup1)*cp_ocean*frazil_factor
+                         T_prog(index_redist_heat)%field(i,j,k,taup1) = tfreeze
+                     endif
+                  endif
+               enddo
+            enddo
+         enddo
+     endif
+
+  endif  ! endif for freezing_temp_simple
+
+
+  if (id_frazil_redist_2d > 0) then
+     call diagnose_2d(Time, Grd, id_frazil_redist_2d, T_diag(index_frazil_redist)%field(:,:,1)*dtimer)
+  endif
+  if (id_frazil_redist_3d > 0) then
+     call diagnose_3d(Time, Grd, id_frazil_redist_3d, T_diag(index_frazil_redist)%field(:,:,:)*dtimer)
+  endif
+ 
+
+end subroutine compute_frazil_redist_heating
+! </SUBROUTINE> NAME="compute_frazil_redist_heating">
+
 
      
 end module ocean_frazil_mod

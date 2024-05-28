@@ -80,6 +80,8 @@ module ocean_types_mod
      character(len=72)  :: bryan_lewis_mix
      character(len=72)  :: hwf_mix
      character(len=72)  :: tanh_diff_cbt
+     character(len=72)  :: read_diff_cbt
+     character(len=72)  :: j09_diff_cbt
      character(len=72)  :: horz_bih_tracer
      character(len=72)  :: horz_lap_tracer
      character(len=72)  :: horz_lap_friction
@@ -118,6 +120,7 @@ module ocean_types_mod
      character(len=72)  :: ocean_sponges_tracer
      character(len=72)  :: ocean_sponges_velocity
      character(len=72)  :: ocean_ideal_surf_wave
+     character(len=72)  :: fafmip_heat
   end type ocean_options_type
 
 
@@ -422,6 +425,9 @@ module ocean_types_mod
      real, dimension(isd:ied,jsd:jed,nk)   :: pressure_at_depth    ! hydrostatic pressure (including patm)
      real, dimension(isd:ied,jsd:jed,nk)   :: drhodT               ! partial rho wrt theta (kg/(m^3 C)
      real, dimension(isd:ied,jsd:jed,nk)   :: drhodS               ! partial rho wrt salinity (kg/(m^3 psu)
+     real, dimension(isd:ied,jsd:jed,nk)   :: dpotrhodT            ! partial potrho wrt theta (kg/(m^3 C)
+     real, dimension(isd:ied,jsd:jed,nk)   :: dpotrhodS            ! partial potrho wrt salinity (kg/(m^3 psu)
+     real, dimension(isd:ied,jsd:jed,nk)   :: dpotrhodP            ! partial potrho wrt pressure (kg/(m^3 psu)
      real, dimension(isd:ied,jsd:jed,nk)   :: drhodP               ! partial rho wrt pressure (kg/(m^3 Pa)
      real, dimension(isd:ied,jsd:jed,nk)   :: drhodz_wt            ! d(neutral density)/dz (kg/m^4) at W-point
      real, dimension(isd:ied,jsd:jed,nk)   :: drhodz_zt            ! d(neutral density)/dz (kg/m^4) at T-point
@@ -472,9 +478,9 @@ module ocean_types_mod
      integer :: sfc_flux_id=-1         ! index for time_interp_external
      integer :: horz_advect_scheme=-1  ! id for horizontal advection scheme
      integer :: vert_advect_scheme=-1  ! id for vertical advection scheme
-     integer :: ppm_hlimiter=1          ! Limiter for use with PPM in horizontal
-     integer :: ppm_vlimiter=1          ! Limiter for use with PPM in vertical
-     integer :: mdt_scheme=4            ! Version of Multi-Dim. Modified Daru & Tenaud (MDMDT)
+     integer :: ppm_hlimiter=1         ! Limiter for use with PPM in horizontal
+     integer :: ppm_vlimiter=1         ! Limiter for use with PPM in vertical
+     integer :: mdt_scheme=4           ! Version of Multi-Dim. Modified Daru & Tenaud (MDMDT)
 
      type(obc_flux), _ALLOCATABLE, dimension(:) :: otf   _NULL ! flux through open boundaries, allocate nobc
 
@@ -557,8 +563,10 @@ module ocean_types_mod
      real, dimension(isd:ied,jsd:jed,2)      :: smf_bgrid       ! momentum flux per mass into ocean surface at Bgrid uv point (N/m^2)
      real, dimension(isd:ied,jsd:jed,2)      :: smf_cgrid       ! momentum flux per mass into ocean surface at Cgrid u/v points (N/m^2)
      real, dimension(isd:ied,jsd:jed,2)      :: bmf             ! momentum flux per mass into ocean bottom  (N/m^2)
+     real, dimension(isd:ied,jsd:jed)        :: ustar           ! surface friction velocity (m/s)
      real, dimension(isd:ied,jsd:jed)        :: gamma           ! dimensionful bottom drag coefficient (kg/(m^2 sec))
      real, dimension(isd:ied,jsd:jed)        :: langmuirfactor  ! dimensionless langmuir turbulence enhancement factor (non dimensional)
+     real, dimension(isd:ied,jsd:jed)        :: u10             ! 10m wind speed (m/s)
      real, dimension(isd:ied,jsd:jed)        :: ustoke          ! x-dir surface stokes drift (m/s)
      real, dimension(isd:ied,jsd:jed)        :: vstoke          ! y-dir surface stokes drift (m/s)
      real, dimension(isd:ied,jsd:jed)        :: wavlen          ! wave length (m)
@@ -960,6 +968,9 @@ module ocean_types_mod
      real, _ALLOCATABLE, dimension(:,:,:)   :: pressure_at_depth _NULL ! hydrostatic pressure (including patm)
      real, _ALLOCATABLE, dimension(:,:,:)   :: drhodT            _NULL ! partial rho wrt theta (kg/(m^3 C)
      real, _ALLOCATABLE, dimension(:,:,:)   :: drhodS            _NULL ! partial rho wrt salinity (kg/(m3 psu)
+     real, _ALLOCATABLE, dimension(:,:,:)   :: dpotrhodT         _NULL ! partial potrho wrt theta (kg/(m^3 C)
+     real, _ALLOCATABLE, dimension(:,:,:)   :: dpotrhodS         _NULL ! partial potrho wrt salinity (kg/(m3 psu)
+     real, _ALLOCATABLE, dimension(:,:,:)   :: dpotrhodP         _NULL ! partial potrho wrt pressure (kg/(m3 psu)
      real, _ALLOCATABLE, dimension(:,:,:)   :: drhodP            _NULL ! partial rho wrt pressure (kg/(m3 Pa)
      real, _ALLOCATABLE, dimension(:,:,:)   :: drhodz_wt         _NULL ! d(neutral rho)/dz (kg/m^4) at W-point
      real, _ALLOCATABLE, dimension(:,:,:)   :: drhodz_zt         _NULL ! d(neutral rho)/dz (kg/m^4) at T-point
@@ -1087,8 +1098,10 @@ module ocean_types_mod
      real, _ALLOCATABLE, dimension(:,:,:)     :: smf_bgrid       _NULL ! momentum flux into ocn surface (N/m^2) at Bgrid uv point
      real, _ALLOCATABLE, dimension(:,:,:)     :: smf_cgrid       _NULL ! momentum flux into ocn surface (N/m^2) at Cgrid u/v points
      real, _ALLOCATABLE, dimension(:,:,:)     :: bmf             _NULL ! momentum flux per mass into ocean bottom  (N/m^2)
+     real, _ALLOCATABLE, dimension(:,:)       :: ustar           _NULL ! surface friction velocity (m/s)
      real, _ALLOCATABLE, dimension(:,:)       :: gamma           _NULL ! dimensionful bottom drag coefficient (kg/(m^2 sec))
      real, _ALLOCATABLE, dimension(:,:)       :: langmuirfactor  _NULL ! Langmuir turbulence enhancement factor
+     real, _ALLOCATABLE, dimension(:,:)       :: u10             _NULL ! 10m wind speed (m/s)
      real, _ALLOCATABLE, dimension(:,:)       :: ustoke          _NULL ! x-dir surface stokes drift
      real, _ALLOCATABLE, dimension(:,:)       :: vstoke          _NULL ! y-dir surface stokes drift
      real, _ALLOCATABLE, dimension(:,:)       :: wavlen          _NULL ! wave length
@@ -1219,15 +1232,21 @@ module ocean_types_mod
      real, pointer, dimension(:,:) :: ustoke          =>NULL() ! x-dir surface stokes drift
      real, pointer, dimension(:,:) :: vstoke          =>NULL() ! y-dir surface stokes drift
      real, pointer, dimension(:,:) :: wavlen          =>NULL() ! wave length
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
      real, pointer, dimension(:,:) :: aice             =>NULL() !  ice fraction
      real, pointer, dimension(:,:) :: mh_flux          =>NULL() ! heat flux from melting ice (W/m^2)
      real, pointer, dimension(:,:) :: wfimelt          =>NULL() ! water flux from melting ice (kg/m^2/s)
      real, pointer, dimension(:,:) :: wfiform          =>NULL() ! water flux from forming ice (kg/m^2/s)
+     real, pointer, dimension(:,:) :: licefw           =>null() ! waterflux into ocean (kg/m2/s) off Antarctica and Greenland
+     real, pointer, dimension(:,:) :: liceht           =>null() ! heatflux due to land ice melt (W/m2)
+#endif
 #if defined(ACCESS_CM)
      real, pointer, dimension(:,:) :: co2              =>NULL() ! co2
-     real, pointer, dimension(:,:) :: wnd              =>NULL() ! wind speed
 #endif
+     real, pointer, dimension(:,:) :: wnd              =>NULL() ! wind speed
+#if defined(ACCESS_OM) && defined(CSIRO_BGC)
+     real, pointer, dimension(:,:) :: iof_nit              =>NULL() ! ice-ocean flux of nitrate
+     real, pointer, dimension(:,:) :: iof_alg              =>NULL() ! ice-ocean flux of algae
 #endif
      integer :: xtype                                          ! REGRID, REDIST or DIRECT
 
@@ -1248,12 +1267,16 @@ module ocean_types_mod
      real, pointer, dimension(:,:)    :: frazil  =>NULL() ! accumulated heating (J/m^2) from 
                                                           ! frazil formation in the ocean 
      real, pointer, dimension(:,:)    :: area    =>NULL() ! T-cell area.
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
      real, pointer, dimension(:,:,:)  :: gradient =>NULL() ! x/y slopes of sea surface.
+#endif
+#if defined(ACCESS_OM) && defined(CSIRO_BGC)
+     real, pointer, dimension(:,:)    :: n_surf =>NULL() ! sea surface nitrate (mmol m-3)
+     real, pointer, dimension(:,:)    :: alg_surf =>NULL() ! sea surface algae (mmol m-3)
+#endif
 #if defined(ACCESS_CM)
      real, pointer, dimension(:,:)    :: co2     =>NULL() ! co2 ( )
      real, pointer, dimension(:,:)    :: co2flux =>NULL() ! co2 flux ()
-#endif
 #endif
      logical, pointer, dimension(:,:) :: maskmap =>NULL()! A pointer to an array indicating which
                                                          ! logical processors are actually used for

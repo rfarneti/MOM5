@@ -168,6 +168,7 @@ logical :: compute_watermass_diag = .false.
 
 ! for diagnostics 
 integer, dimension(:), allocatable :: id_rivermix
+integer, dimension(:), allocatable :: id_rivermix_on_nrho
 integer, dimension(:), allocatable :: id_runoffmix
 integer, dimension(:), allocatable :: id_calvingmix
 integer :: id_diff_cbt_river_t =-1
@@ -182,6 +183,7 @@ integer :: id_eta_tend_calvingmix_glob =-1
 
 integer :: id_neut_rho_rivermix   =-1
 integer :: id_neut_rho_runoffmix  =-1
+integer :: id_pot_rho_runoffmix   =-1
 integer :: id_neut_rho_calvingmix =-1
 
 integer :: id_neut_rho_rivermix_on_nrho   =-1
@@ -536,9 +538,11 @@ contains
 
     ! register for diag_manager 
     allocate (id_rivermix(num_prog_tracers))
+    allocate (id_rivermix_on_nrho(num_prog_tracers))
     allocate (id_runoffmix(num_prog_tracers))
     allocate (id_calvingmix(num_prog_tracers))
     id_rivermix   = -1
+    id_rivermix_on_nrho   = -1
     id_runoffmix  = -1
     id_calvingmix = -1
 
@@ -548,6 +552,10 @@ contains
                             Grd%tracer_axes(1:3), Time%model_time,                                 &
                             'cp*rivermix*rho_dzt*temp', 'Watt/m^2',                                & 
                             missing_value=missing_value, range=(/-1.e10,1.e10/))
+           id_rivermix_on_nrho(n) = register_diag_field ('ocean_model', trim(T_prog(n)%name)//'_rivermix_on_nrho', &
+                            Dens%neutralrho_axes(1:3), Time%model_time,                                 &
+                            'cp*rivermix*rho_dzt*temp binned to neutral density', 'Watt/m^2',       &
+                            missing_value=missing_value, range=(/-1.e20,1.e20/))
            id_runoffmix(n) = register_diag_field ('ocean_model', trim(T_prog(n)%name)//'_runoffmix',&
                             Grd%tracer_axes(1:3), Time%model_time,                                  &
                             'cp*runoffmix*rho_dzt*temp', 'Watt/m^2',                                & 
@@ -560,6 +568,11 @@ contains
            id_rivermix(n) = register_diag_field ('ocean_model', trim(T_prog(n)%name)//'_rivermix', &
                             Grd%tracer_axes(1:3), Time%model_time,                                 &
                             'rivermix*rho_dzt*tracer for '//trim(T_prog(n)%name),                  &
+                            trim(T_prog(n)%flux_units),                                            &
+                            missing_value=missing_value, range=(/-1.e10,1.e10/))
+           id_rivermix_on_nrho(n) = register_diag_field ('ocean_model', trim(T_prog(n)%name)//'_rivermix_on_nrho', &
+                            Dens%neutralrho_axes(1:3), Time%model_time,                                 &
+                            'rivermix*rho_dzt*tracer for '//trim(T_prog(n)%name)//' binned to neutral density',&
                             trim(T_prog(n)%flux_units),                                            &
                             missing_value=missing_value, range=(/-1.e10,1.e10/))
            id_runoffmix(n) = register_diag_field ('ocean_model', trim(T_prog(n)%name)//'_runoffmix',&
@@ -667,6 +680,9 @@ subroutine rivermix (Time, Thickness, Dens, T_prog, river, runoff, calving, &
       do n=1,num_prog_tracers 
          if(id_rivermix(n) > 0) then 
             call diagnose_3d(Time, Grd, id_rivermix(n), T_prog(n)%wrk1(:,:,:)*T_prog(n)%conversion)
+         endif
+         if(id_rivermix_on_nrho(n) > 0) then
+            call diagnose_3d_rho(Time, Dens, id_rivermix_on_nrho(n), T_prog(n)%wrk1*T_prog(n)%conversion)
          endif
       enddo
       call watermass_diag_river(Time, Dens, T_prog, river, &
@@ -1248,6 +1264,12 @@ subroutine watermass_diag_init(Time, Dens)
     'update of locally ref potrho from runoffmix scheme',                          &
     '(kg/m^3)/sec', missing_value=missing_value, range=(/-1e20,1e20/))
   if(id_neut_rho_runoffmix > 0) compute_watermass_diag = .true. 
+
+  id_pot_rho_runoffmix = register_diag_field ('ocean_model', 'pot_rho_runoffmix',&
+    Grd%tracer_axes(1:3), Time%model_time,                                       &
+    'update of depth ref potrho from runoffmix scheme',                          &
+    '(kg/m^3)/sec', missing_value=missing_value, range=(/-1e20,1e20/))
+  if(id_pot_rho_runoffmix > 0) compute_watermass_diag = .true. 
 
   id_neut_rho_runoffmix_on_nrho = register_diag_field ('ocean_model',                   &
    'neut_rho_runoffmix_on_nrho',Dens%neutralrho_axes(1:3), Time%model_time,             &
@@ -2344,6 +2366,7 @@ subroutine watermass_diag_runoff(Time, Dens, T_prog, runoff, &
   call diagnose_3d_rho(Time, Dens, id_wdian_rho_runoffmix_on_nrho, wrk3)
   call diagnose_3d_rho(Time, Dens, id_tform_rho_runoffmix_on_nrho, wrk4)
 
+
   if(id_eta_tend_runoffmix > 0 .or. id_eta_tend_runoffmix_glob > 0) then
       eta_tend(:,:) = 0.0
       do k=1,nk
@@ -2357,7 +2380,22 @@ subroutine watermass_diag_runoff(Time, Dens, T_prog, runoff, &
       call diagnose_sum(Time, Grd, Dom, id_eta_tend_runoffmix_glob, eta_tend, cellarea_r)
   endif
 
-
+  
+  ! flux-form contributions to material time derivative and dianeutral transport
+  if(id_pot_rho_runoffmix > 0) then 
+     wrk1(:,:,:) = 0.0
+     wrk2(:,:,:) = 0.0
+     do k=1,nk
+        do j=jsc,jec
+           do i=isc,iec
+              wrk1(i,j,k) = Grd%tmask(i,j,k)*(Dens%dpotrhodT(i,j,k)*temp_wrk(i,j,k)+Dens%dpotrhodS(i,j,k)*salt_wrk(i,j,k))
+              wrk2(i,j,k) = wrk1(i,j,k)*Dens%rho_dztr_tau(i,j,k)
+           enddo
+        enddo
+     enddo
+     call diagnose_3d(Time, Grd, id_pot_rho_runoffmix, wrk2(:,:,:))
+  endif
+  
   !-----------------------------------------------------------------------------
   ! advective-form material time derivative and associated dianeutral transport 
   !

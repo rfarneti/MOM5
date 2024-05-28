@@ -67,7 +67,7 @@ module ice_model_mod
                               add_diurnal_sw, id_mib, ice_data_type_chksum,      &
                               id_ustar, id_vstar, channel_viscosity, smag_ocn,   &
                               ssh_gravity, chan_cfl_limit, id_vocean, id_uocean, &
-                              id_vchan, id_uchan
+                              id_vchan, id_uchan, id_wnd
   use ice_type_mod,     only: do_sun_angle_for_alb,              &
 			      id_alb_vis_dir, id_alb_vis_dif,    &
 	                      id_alb_nir_dir, id_alb_nir_dif
@@ -1456,6 +1456,8 @@ contains
          !                                       mask=Ice%mask       )
 
     if (id_ext>0) sent = send_data(id_ext, ext(Ice%part_size(isc:iec,jsc:jec,1)), Ice%Time, mask=Ice%mask)
+    if (id_wnd>0) sent = send_data(id_wnd, Ice%wnd(isc:iec,jsc:jec,1), Ice%Time, mask=Ice%mask)
+
     if (id_hs>0) sent  = send_data(id_hs, ice_avg(Ice%h_snow(isc:iec,jsc:jec,:),Ice%part_size(isc:iec,jsc:jec,:)), &
                          Ice%Time, mask=Ice%mask)
     if (id_hi>0) sent  = send_data(id_hi, ice_avg(Ice%h_ice(isc:iec,jsc:jec,:) ,Ice%part_size(isc:iec,jsc:jec,:)), &
@@ -1694,6 +1696,7 @@ contains
     endif
 
     uf = 0.0; vf = 0.0
+    uf0 = 0.0; vf0 = 0.0 !Must have a value in case of no subcycling
     do k=2,km
        call ice_advect(uc, vc, Ice%part_size(:,:,k))
        call ice_advect(uc, vc, Ice%h_snow   (:,:,k), uf0, vf0)

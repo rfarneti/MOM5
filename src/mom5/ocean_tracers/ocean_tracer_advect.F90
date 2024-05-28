@@ -352,6 +352,7 @@ real, parameter :: a6=37.0/60.0, b6=-2.0/15.0, c6=1.0/60.0
 logical :: used
 
 integer  :: id_neut_rho_advect
+integer  :: id_pot_rho_advect
 integer  :: id_neut_rho_advect_on_nrho
 integer  :: id_wdian_rho_advect
 integer  :: id_wdian_rho_advect_on_nrho
@@ -373,6 +374,7 @@ integer  :: id_tform_salt_advect
 integer  :: id_tform_salt_advect_on_nrho
 
 integer, dimension(:), allocatable :: id_tracer_advection
+integer, dimension(:), allocatable :: id_tracer_advection_on_nrho
 integer, dimension(:), allocatable :: id_tracer2_advection
 integer, dimension(:), allocatable :: id_tracer_adv_diss
 
@@ -739,7 +741,7 @@ subroutine ocean_tracer_advect_init (Grid, Domain, Time, Dens, T_prog, obc, debu
   allocate( sm(isd:ied,jsd:jed,nk) )
   sm(:,:,:)            = 0.0
 
-  call advection_diag_init(Time, T_prog(:))
+  call advection_diag_init(Time, Dens, T_prog(:))
   call watermass_diag_init(Time, Dens)
 
   ! initialize clock ids 
@@ -762,9 +764,10 @@ end subroutine ocean_tracer_advect_init
 ! Initialize the main tracer advection diagnostics. 
 ! </DESCRIPTION>
 !
-subroutine advection_diag_init (Time, T_prog)
+subroutine advection_diag_init (Time, Dens, T_prog)
 
   type(ocean_time_type),        intent(in)  :: Time
+  type(ocean_density_type),     intent(in)  :: Dens
   type(ocean_prog_tracer_type), intent(in)  :: T_prog(:)
 
   integer :: n  
@@ -772,6 +775,7 @@ subroutine advection_diag_init (Time, T_prog)
   stdoutunit=stdout()
 
   allocate (id_tracer_advection(num_prog_tracers))
+  allocate (id_tracer_advection_on_nrho(num_prog_tracers))
   allocate (id_tracer2_advection(num_prog_tracers))
   allocate (id_tracer_adv_diss(num_prog_tracers))
   allocate (id_sweby_advect(num_prog_tracers))
@@ -788,6 +792,7 @@ subroutine advection_diag_init (Time, T_prog)
   allocate (id_yflux_adv_int_z(num_prog_tracers))
 
   id_tracer_advection =-1
+  id_tracer_advection_on_nrho =-1
   id_tracer2_advection=-1
   id_tracer_adv_diss  =-1
   id_sweby_advect     =-1
@@ -808,6 +813,9 @@ subroutine advection_diag_init (Time, T_prog)
     if(n==index_temp) then 
       id_tracer_advection(n) = register_diag_field ('ocean_model', trim(T_prog(n)%name)//'_advection', &
                    Grd%tracer_axes(1:3), Time%model_time, 'cp*rho*dzt*advection tendency',             &
+                   trim(T_prog(n)%flux_units), missing_value=missing_value, range=(/-1.e18,1.e18/))
+      id_tracer_advection_on_nrho(n) = register_diag_field ('ocean_model', trim(T_prog(n)%name)//'_advection_on_nrho', &
+                   Dens%neutralrho_axes(1:3), Time%model_time, 'cp*rho*dzt*advection tendency binned to neutral density',&
                    trim(T_prog(n)%flux_units), missing_value=missing_value, range=(/-1.e18,1.e18/))
       id_tracer2_advection(n) = register_diag_field ('ocean_model', trim(T_prog(n)%name)//'_sq_advection', &
                    Grd%tracer_axes(1:3), Time%model_time, 'rho*dzt*advection tendency for (cp*temp)^2',    &
@@ -863,6 +871,9 @@ subroutine advection_diag_init (Time, T_prog)
 
       id_tracer_advection(n) = register_diag_field ('ocean_model', trim(T_prog(n)%name)//'_advection', &
                    Grd%tracer_axes(1:3), Time%model_time, 'rho*dzt*advection tendency',         &
+                   'kg/(sec*m^2)', missing_value=missing_value, range=(/-1.e18,1.e18/))
+      id_tracer_advection_on_nrho(n) = register_diag_field ('ocean_model', trim(T_prog(n)%name)//'_advection_on_nrho', &
+                   Dens%neutralrho_axes(1:3), Time%model_time, 'rho*dzt*advection tendency binned to neutral density',&
                    'kg/(sec*m^2)', missing_value=missing_value, range=(/-1.e18,1.e18/))
       id_tracer2_advection(n) = register_diag_field ('ocean_model', trim(T_prog(n)%name)//'_sq_advection',    &
                    Grd%tracer_axes(1:3), Time%model_time, 'rho*dzt*advection tendency for tracer sqrd',&
@@ -942,6 +953,11 @@ subroutine watermass_diag_init (Time, Dens)
      Grd%tracer_axes(1:3), Time%model_time, 'advection tendency for neutral rho',&
     '(kg/m^3)/sec', missing_value=missing_value, range=(/-1e20,1e20/))
   if(id_neut_rho_advect > 0) compute_watermass_diag = .true. 
+
+  id_pot_rho_advect = register_diag_field ('ocean_model', 'pot_rho_advect',        &
+     Grd%tracer_axes(1:3), Time%model_time, 'advection tendency for potential rho',&
+    '(kg/m^3)/sec', missing_value=missing_value, range=(/-1e20,1e20/))
+  if(id_pot_rho_advect > 0) compute_watermass_diag = .true. 
 
   id_wdian_rho_advect = register_diag_field ('ocean_model', 'wdian_rho_advect',&
     Grd%tracer_axes(1:3), Time%model_time,                                     &
@@ -2162,6 +2178,9 @@ subroutine vert_advect_tracer(Time, Adv_vel, Dens, Thickness, T_prog, Tracer, nt
 
       if(id_tracer_advection(ntracer) > 0) then 
          call diagnose_3d(Time, Grd, id_tracer_advection(ntracer), Tracer%conversion*advect_tendency(:,:,:))
+      endif
+      if(id_tracer_advection_on_nrho(ntracer) > 0) then
+         call diagnose_3d_rho(Time, Dens, id_tracer_advection_on_nrho(ntracer), Tracer%conversion*advect_tendency)
       endif
 
       ! for watermass_diag 
@@ -7410,7 +7429,11 @@ subroutine watermass_diag(Time, Dens)
 
   if(.not. compute_watermass_diag) return 
 
-  tau = Time%tau
+  tau         = Time%tau
+  wrk1(:,:,:) = 0.0
+  wrk2(:,:,:) = 0.0
+  wrk3(:,:,:) = 0.0
+  wrk4(:,:,:) = 0.0
 
 
   ! both temperature and salinity contributions 
@@ -7431,6 +7454,7 @@ subroutine watermass_diag(Time, Dens)
   call diagnose_3d_rho(Time, Dens, id_neut_rho_advect_on_nrho, wrk2)
   call diagnose_3d_rho(Time, Dens, id_wdian_rho_advect_on_nrho, wrk3)
   call diagnose_3d_rho(Time, Dens, id_tform_rho_advect_on_nrho, wrk4)
+
 
   ! temperature contributions 
   do k=1,nk
@@ -7468,6 +7492,23 @@ subroutine watermass_diag(Time, Dens)
   call diagnose_3d_rho(Time, Dens, id_wdian_salt_advect_on_nrho, wrk3)
   call diagnose_3d_rho(Time, Dens, id_tform_salt_advect_on_nrho, wrk4)
 
+  
+  if(id_pot_rho_advect > 0) then 
+     wrk1(:,:,:) = 0.0
+     wrk2(:,:,:) = 0.0
+     
+     do k=1,nk
+        do j=jsc,jec
+           do i=isc,iec
+              wrk1(i,j,k) = neutral_temp_advect(i,j,k)*Dens%dpotrhodT(i,j,k) &
+                          + neutral_salt_advect(i,j,k)*Dens%dpotrhodS(i,j,k)
+              wrk2(i,j,k) = wrk1(i,j,k)*Dens%rho_dztr_tau(i,j,k) 
+           enddo
+        enddo
+     enddo
+     call diagnose_3d(Time, Grd, id_pot_rho_advect, wrk2(:,:,:))
+  endif
+  
 end subroutine watermass_diag
 ! </SUBROUTINE> NAME="watermass_diag"
 

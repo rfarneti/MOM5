@@ -821,12 +821,7 @@ subroutine vert_mix_gotm_bgrid (Time, Thickness, Velocity, T_prog, Dens, visc_cb
                 active_cells= Grd%umask(i,j,1)   + Grd%umask(i-1,j,1)   + &
                               Grd%umask(i,j-1,1) + Grd%umask(i-1,j-1,1) + epsln
 
-                smf1_active = (Velocity%smf_bgrid(i,j,1)   + Velocity%smf_bgrid(i-1,j,1) + &
-                               Velocity%smf_bgrid(i,j-1,1) + Velocity%smf_bgrid(i-1,j-1,1))/active_cells
-                smf2_active = (Velocity%smf_bgrid(i,j,2)   + Velocity%smf_bgrid(i-1,j,2) + &
-                               Velocity%smf_bgrid(i,j-1,2) + Velocity%smf_bgrid(i-1,j-1,2))/active_cells
-                momflux = sqrt(smf1_active**2 + smf2_active**2)
-                u_taus  = sqrt(momflux*rho0r) + epsln
+                u_taus  = Velocity%ustar(i,j) + epsln
 
                 bmf1_active = (Velocity%bmf(i,j,1)   + Velocity%bmf(i-1,j,1) + &
                                Velocity%bmf(i,j-1,1) + Velocity%bmf(i-1,j-1,1))/active_cells
@@ -852,7 +847,7 @@ subroutine vert_mix_gotm_bgrid (Time, Thickness, Velocity, T_prog, Dens, visc_cb
                    nuh(k)  = diff_cbt_gotm(i,j,m)
                    NN1d(k) = wrk1_v(i,j,m,1)
                    SS1d(k) = wrk1_v(i,j,m,2)
-                   dz(k)   = Thickness%dzt(i,j,m)
+                   dz(k+1)   = Thickness%dzt(i,j,m)
                 enddo
                 ! surface and bottom conditions
                 NN1d(0)  = NN1d(1)
@@ -863,7 +858,7 @@ subroutine vert_mix_gotm_bgrid (Time, Thickness, Velocity, T_prog, Dens, visc_cb
                 nuh(kb)  = nuh(kb-1)
                 NN1d(kb) = NN1d(kb-1)
                 SS1d(kb) = 0.0
-                dz(kb)   = dz(kb-1)
+                dz(0)   = 0
 
                 ! invoke GOTM
                 call do_turbulence(kb, dtime, depth, u_taus, u_taub, &

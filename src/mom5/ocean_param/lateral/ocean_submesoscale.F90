@@ -222,7 +222,7 @@ use constants_mod,     only: epsln
 use diag_manager_mod,  only: register_diag_field, register_static_field, need_data, send_data
 use fms_mod,           only: write_version_number, open_namelist_file, close_file, check_nml_error
 use fms_mod,           only: stdout, stdlog, read_data, NOTE, FATAL, WARNING
-use mpp_domains_mod,   only: mpp_update_domains, XUPDATE, YUPDATE, CGRID_NE
+use mpp_domains_mod,   only: mpp_update_domains, XUPDATE, YUPDATE, CGRID_NE, EDGEUPDATE, SUPDATE, WUPDATE
 use mpp_domains_mod,   only: mpp_global_sum, NON_BITWISE_EXACT_SUM
 use mpp_mod,           only: input_nml_file, mpp_error, mpp_max, mpp_pe
 use time_manager_mod,  only: time_type, increment_time
@@ -266,6 +266,9 @@ integer :: id_tz_trans_submeso_adv =-1
 integer :: id_tx_trans_nrho_submeso=-1
 integer :: id_ty_trans_nrho_submeso=-1
 integer :: id_tz_trans_nrho_submeso=-1
+integer :: id_tx_trans_rho_submeso=-1
+integer :: id_ty_trans_rho_submeso=-1
+integer :: id_tz_trans_rho_submeso=-1
 integer :: id_front_length_submeso =-1
 integer :: id_buoy_freq_ave_submeso=-1 
 integer :: id_uhrho_et_submeso     =-1
@@ -287,6 +290,7 @@ integer :: id_eta_tend_subdiff_tend     =-1
 integer :: id_eta_tend_subdiff_tend_glob=-1
 
 integer :: id_neut_rho_submeso          =-1
+integer :: id_pot_rho_submeso           =-1
 integer :: id_neut_rho_submeso_on_nrho  =-1
 integer :: id_wdian_rho_submeso         =-1
 integer :: id_wdian_rho_submeso_on_nrho =-1
@@ -335,6 +339,7 @@ integer, dimension(:), allocatable :: id_zflux_submeso       ! k-directed flux
 integer, dimension(:), allocatable :: id_xflux_submeso_int_z ! vertically integrated i-flux
 integer, dimension(:), allocatable :: id_yflux_submeso_int_z ! vertically integrated j-flux
 integer, dimension(:), allocatable :: id_submeso             ! tendency from streamfunction portion of submesoscale param 
+integer, dimension(:), allocatable :: id_submeso_on_nrho     ! tendency from streamfunction portion of submesoscale param binned to neutral density
 
 integer, dimension(:), allocatable :: id_xflux_subdiff       ! i-directed horz diffusive flux 
 integer, dimension(:), allocatable :: id_yflux_subdiff       ! j-directed horz diffusive flux 
@@ -456,6 +461,7 @@ private compute_submeso_skewsion
 private compute_submeso_upwind 
 private compute_submeso_sweby
 private maximum_bottom_w_submeso
+private transport_on_rho_submeso
 private transport_on_nrho_submeso
 private transport_on_nrho_submeso_adv
 private watermass_diag_init
@@ -904,6 +910,15 @@ contains
          'T-cell k-mass transport from submesoscale param on neutral rho'                 &
          ,trim(transport_dims),missing_value=missing_value, range=(/-1e20,1e20/))
 
+    id_tx_trans_rho_submeso = register_diag_field('ocean_model','tx_trans_rho_submeso',  &
+         Dens%potrho_axes_flux_x(1:3),Time%model_time,                                   &
+         'T-cell i-mass transport from submesoscale param on pot_rho'                    &
+         ,trim(transport_dims),missing_value=missing_value,range=(/-1e20,1e20/))
+    id_ty_trans_rho_submeso = register_diag_field('ocean_model','ty_trans_rho_submeso',  &
+         Dens%potrho_axes_flux_y(1:3),Time%model_time,                                   &
+         'T-cell j-mass transport from submesoscale param on pot_rho'                    &
+         ,trim(transport_dims),missing_value=missing_value,range=(/-1e20,1e20/))
+
     id_u_et_submeso = register_diag_field ('ocean_model', 'u_et_submeso', &
         Grd%tracer_axes_flux_x(1:3), Time%model_time,                     &
        'i-component of submesoscale transport velocity',                  &
@@ -1019,6 +1034,7 @@ contains
     allocate (id_xflux_submeso_int_z(num_prog_tracers))
     allocate (id_yflux_submeso_int_z(num_prog_tracers))
     allocate (id_submeso(num_prog_tracers))
+    allocate (id_submeso_on_nrho(num_prog_tracers))
 
     allocate (id_xflux_subdiff(num_prog_tracers))
     allocate (id_yflux_subdiff(num_prog_tracers))
@@ -1061,6 +1077,12 @@ contains
                 'rho*dzt*cp*submesoscale tendency (heating)',            &
                 trim(T_prog(n)%flux_units), missing_value=missing_value, &
                 range=(/-1.e10,1.e10/))
+           id_submeso_on_nrho(n) = register_diag_field ('ocean_model',   &
+                trim(T_prog(n)%name)//'_submeso_on_nrho',                &
+                Dens%neutralrho_axes(1:3), Time%model_time,              &
+                'rho*dzt*cp*submesoscale tendency (heating) binned to neutral density',&
+                trim(T_prog(n)%flux_units), missing_value=missing_value, &
+                range=(/-1.e20,1.e20/))
 
            id_xflux_subdiff(n) = register_diag_field ('ocean_model', &
                 trim(T_prog(n)%name)//'_xflux_subdiff',              &
@@ -1127,6 +1149,12 @@ contains
                 'rho*dzt*submesoscale tendency for '//trim(T_prog(n)%name), &
                 trim(T_prog(n)%flux_units), missing_value=missing_value,    &
                 range=(/-1.e10,1.e10/))
+           id_submeso_on_nrho(n) = register_diag_field ('ocean_model',      &
+                trim(T_prog(n)%name)//'_submeso_on_nrho',                   &
+                Dens%neutralrho_axes(1:3), Time%model_time,                 &
+                'rho*dzt*submesoscale tendency for '//trim(T_prog(n)%name)//' binned to neutral density', &
+                trim(T_prog(n)%flux_units), missing_value=missing_value,    &
+                range=(/-1.e20,1.e20/))
 
 
            id_xflux_subdiff(n) = register_diag_field ('ocean_model',          &
@@ -1237,9 +1265,9 @@ end subroutine ocean_submesoscale_init
       call compute_submeso_skewsion(Thickness, Dens, Time, T_prog)
   elseif(submeso_advect_flux) then
       if(submeso_advect_upwind) then  
-         call compute_submeso_upwind(Time, T_prog)
+         call compute_submeso_upwind(Time, Dens, T_prog)
       elseif(submeso_advect_sweby) then 
-         call compute_submeso_sweby(Thickness, Time, T_prog)
+         call compute_submeso_sweby(Thickness, Time, Dens, T_prog)
       endif 
   endif
   call watermass_diag(Time, T_prog, Dens)
@@ -1273,7 +1301,6 @@ subroutine compute_bldepth(Time, Thickness, Dens, T_prog, surf_blthick)
 
   integer :: i, j, k, tau
   integer :: num_smooth
-  real    :: mld_thickness
   real    :: active_cells 
 
   tau  = Time%tau 
@@ -1316,7 +1343,7 @@ subroutine compute_bldepth(Time, Thickness, Dens, T_prog, surf_blthick)
       do num_smooth=1,smooth_hblt_num
 
          wrk1_2d(:,:) = 0.0
-         call mpp_update_domains(hblt(:,:), Dom%domain2d) 
+         call mpp_update_domains(hblt(:,:), Dom%domain2d, flags=EDGEUPDATE) 
          k=1
          do j=jsc,jec
             do i=isc,iec
@@ -1327,12 +1354,13 @@ subroutine compute_bldepth(Time, Thickness, Dens, T_prog, surf_blthick)
                         Grd%tmask(i,j-1,k)  +&
                         Grd%tmask(i,j+1,k)
                    if (active_cells > 4.0) then
+! Make sure that we do not smooth to deeper than the maximum column depth. Note that if we are in water cannot have zero index
                        wrk1_2d(i,j) = & 
-                            (4.0*hblt(i,j) +&
+                            min((4.0*hblt(i,j) +&
                             hblt(i-1,j)    +&
                             hblt(i+1,j)    +&
                             hblt(i,j-1)    +&
-                            hblt(i,j+1)) / active_cells
+                            hblt(i,j+1)) / active_cells, Thickness%depth_zwt(i,j,Grd%kmt(i,j)))
                    else
                        wrk1_2d(i,j) = hblt(i,j)
                    endif
@@ -1342,7 +1370,7 @@ subroutine compute_bldepth(Time, Thickness, Dens, T_prog, surf_blthick)
 
          do j=jsc,jec
             do i=isc,iec
-               hblt(i,j) = wrk1_2d(i,j)*Grd%tmask(i,j,k)*Grd%tmask(i,j+1,k)
+               hblt(i,j) = wrk1_2d(i,j)*Grd%tmask(i,j,k)  ! No reason to mask to the north
             enddo
          enddo
 
@@ -1381,23 +1409,27 @@ subroutine compute_bldepth(Time, Thickness, Dens, T_prog, surf_blthick)
 
   ! inverse front length = f/(<N> H), with H=hblt and <N> ave buoyancy freq over hblt
   if(front_length_deform_radius) then 
-      do j=jsd,jed
-         do i=isd,ied
-            buoy_freq_ave(i,j)    = 0.0
-            mld_thickness         = epsln
-            front_length_inv(i,j) = front_length_const_inv 
-            if(kblt(i,j) >= min_kblt) then  
-                buoy_freq_ave(i,j)= epsln
-                mld_thickness     = epsln
-                do k=1,kblt(i,j)
-                   mld_thickness      = mld_thickness      + Thickness%dzt(i,j,k)  
-                   buoy_freq_ave(i,j) = buoy_freq_ave(i,j) - grav_rho0r*Thickness%dzt(i,j,k)*Dens%drhodz_zt(i,j,k)  
-                enddo
-                buoy_freq_ave(i,j)    = sqrt(abs(buoy_freq_ave(i,j))/mld_thickness) 
-                front_length_inv(i,j) = min(front_length_const_inv, coriolis_param(i,j)/(epsln+mld_thickness*buoy_freq_ave(i,j))) 
-            endif 
-         enddo
-      enddo
+     front_length_inv = front_length_const_inv 
+     wrk1_2d(:,:)         = epsln
+     where(kblt>=min_kblt)
+         buoy_freq_ave=epsln
+     elsewhere
+         buoy_freq_ave=0.0
+     endwhere
+     do k=1,maxval(kblt)
+        do j=jsd,jed
+           do i=isd,ied
+              if(kblt(i,j) >= min_kblt .and. k<=kblt(i,j)) then
+                 wrk1_2d(i,j) = wrk1_2d(i,j) + Thickness%dzt(i,j,k)  
+                 buoy_freq_ave(i,j) = buoy_freq_ave(i,j) - grav_rho0r*Thickness%dzt(i,j,k)*Dens%drhodz_zt(i,j,k)  
+              endif
+           enddo
+        enddo
+     enddo
+     where(kblt>=min_kblt)
+        buoy_freq_ave    = sqrt(abs(buoy_freq_ave)/wrk1_2d) 
+        front_length_inv = min(front_length_const_inv, coriolis_param/(epsln+wrk1_2d*buoy_freq_ave)) 
+     endwhere
   endif
 
 
@@ -1449,32 +1481,30 @@ subroutine tracer_derivs(taum1, T_prog)
      dTdy(n)%field(:,:,:) = 0.0
      dTdz(n)%field(:,:,:) = 0.0
 
-     do j=jsc-1,jec
-        do i=isc-1,iec
+     do k=1,maxval(kblt)
+        kp1 = min(k+1,nk)
+        do j=jsc-1,jec
+           do i=isc-1,iec
 
-           if(kblt(i,j) >= min_kblt) then  
-               do k=1,kblt(i,j)
+              if(kblt(i,j) >= max(min_kblt,k)) then  
                   tmaski = Grd%tmask(i,j,k)*Grd%tmask(i+1,j,k)
                   tmaskj = Grd%tmask(i,j,k)*Grd%tmask(i,j+1,k)
                   dTdx(n)%field(i,j,k) = (T_prog(n)%field(i+1,j,k,taum1)-T_prog(n)%field(i,j,k,taum1)) &
                                           *Grd%dxter(i,j)*tmaski
                   dTdy(n)%field(i,j,k) = (T_prog(n)%field(i,j+1,k,taum1)-T_prog(n)%field(i,j,k,taum1)) &
                                           *Grd%dytnr(i,j)*tmaskj
-               enddo
-           endif
+              endif
 
+           enddo
         enddo
-     enddo
 
-     do j=jsd,jed
-        do i=isd,ied
-           if(kblt(i,j) >= min_kblt) then  
-               do k=1,kblt(i,j)
-                  kp1 = min(k+1,nk)
+        do j=jsd,jed
+           do i=isd,ied
+              if(kblt(i,j) >= max(min_kblt,k)) then  
                   dTdz(n)%field(i,j,k) = (T_prog(n)%field(i,j,k,taum1)-T_prog(n)%field(i,j,kp1,taum1)) &
                                           *Grd%tmask(i,j,kp1)*dzwtr(i,j,k)
-               enddo
-           endif
+              endif
+           enddo
         enddo
      enddo
 
@@ -1505,32 +1535,30 @@ subroutine salinity_derivs(taum1, Dens)
   dSdy%field(:,:,:) = 0.0
   dSdz%field(:,:,:) = 0.0
 
-  do j=jsc-1,jec
-     do i=isc-1,iec
+  do k=1,maxval(kblt)
+     kp1 = min(k+1,nk)
+     do j=jsc-1,jec
+        do i=isc-1,iec
 
-        if(kblt(i,j) >= min_kblt) then  
-            do k=1,kblt(i,j)
+           if(kblt(i,j) >= max(min_kblt,k)) then  
                tmaski = Grd%tmask(i,j,k)*Grd%tmask(i+1,j,k)
                tmaskj = Grd%tmask(i,j,k)*Grd%tmask(i,j+1,k)
                dSdx%field(i,j,k) = (Dens%rho_salinity(i+1,j,k,taum1)-Dens%rho_salinity(i,j,k,taum1)) &
                                        *Grd%dxter(i,j)*tmaski
                dSdy%field(i,j,k) = (Dens%rho_salinity(i,j+1,k,taum1)-Dens%rho_salinity(i,j,k,taum1)) &
                                        *Grd%dytnr(i,j)*tmaskj
-            enddo
-        endif
+           endif
 
+        enddo
      enddo
-  enddo
 
-  do j=jsd,jed
-     do i=isd,ied
-        if(kblt(i,j) >= min_kblt) then  
-            do k=1,kblt(i,j)
-               kp1 = min(k+1,nk)
+     do j=jsd,jed
+        do i=isd,ied
+           if(kblt(i,j) >= max(min_kblt,k)) then  
                dSdz%field(i,j,k) = (Dens%rho_salinity(i,j,k,taum1)-Dens%rho_salinity(i,j,kp1,taum1)) &
                                        *Grd%tmask(i,j,kp1)*dzwtr(i,j,k)
-            enddo
-        endif
+           endif
+        enddo
      enddo
   enddo
 
@@ -1669,8 +1697,8 @@ subroutine compute_psi(Time, Dens, Thickness)
   if(smooth_psi) then 
       do num_smooth=1,smooth_psi_num
 
-         call mpp_update_domains(psix_horz(:,:,:), Dom%domain2d) 
-         call mpp_update_domains(psiy_horz(:,:,:), Dom%domain2d) 
+         call mpp_update_domains(psix_horz(:,:,:), Dom%domain2d, flags=EDGEUPDATE) 
+         call mpp_update_domains(psiy_horz(:,:,:), Dom%domain2d, flags=EDGEUPDATE) 
 
          do ip=0,1
             jq=ip
@@ -1723,38 +1751,44 @@ subroutine compute_psi(Time, Dens, Thickness)
             enddo  ! k=1,1 loop
          enddo     ! ip=0,1 loop
 
-         call mpp_update_domains(psix_horz(:,:,:), Dom%domain2d) 
-         call mpp_update_domains(psiy_horz(:,:,:), Dom%domain2d) 
 
       enddo  ! enddo for number of smoothing iterations 
-  endif      ! endif for smooth_psi
 
+  endif      ! endif for smooth_psi
 
   ! compute 3d vector streamfunction components by applying 
   ! dimensionless vertical structure function 0 <= wrk3 <= 1.
   psix = 0.0
   psiy = 0.0
   wrk3 = 0.0
-  do j=jsc,jec
-      do i=isc,iec
-          if(hblt(i,j) > 0.0 .and. kblt(i,j) > min_kblt) then 
+
+  do k=1,maxval(kblt(isc:iec,jsc:jec))
+     do j=jsc,jec
+        do i=isc,iec
+           if(hblt(i,j) > 0.0 .and. kblt(i,j) > min_kblt .and. k <= kblt(i,j)) then 
               hblt_r = 1.0/hblt(i,j)
-              do k=1,kblt(i,j) 
-                  factor      = (1.0 - 2.0*Thickness%depth_zt(i,j,k)*hblt_r)**2
-                  wrk3(i,j,k) = (1.0 - factor)*(1.0 + fiveover21*factor) 
-                  tmaski = Grd%tmask(i,j,k)*Grd%tmask(i+1,j,k)
-                  tmaskj = Grd%tmask(i,j,k)*Grd%tmask(i,j+1,k)
-                  do ip=0,1 
-                     jq=ip
-                     psix(i,j,k,jq) = wrk3(i,j,k)*psix_horz(i,j,jq)*tmaskj
-                     psiy(i,j,k,ip) = wrk3(i,j,k)*psiy_horz(i,j,ip)*tmaski
-                  enddo
-              enddo
-          endif
-      enddo
+              factor      = (1.0 - 2.0*Thickness%depth_zt(i,j,k)*hblt_r)**2
+              wrk3(i,j,k) = (1.0 - factor)*(1.0 + fiveover21*factor) 
+           endif
+        enddo
+     enddo
   enddo
-  call mpp_update_domains(psix(:,:,:,:), Dom%domain2d) 
-  call mpp_update_domains(psiy(:,:,:,:), Dom%domain2d) 
+  do ip=0,1 
+     jq=ip
+     do k=1,maxval(kblt(isc:iec,jsc:jec))
+        do j=jsc,jec
+           do i=isc,iec
+              tmaski = Grd%tmask(i,j,k)*Grd%tmask(i+1,j,k)
+              tmaskj = Grd%tmask(i,j,k)*Grd%tmask(i,j+1,k)
+              psix(i,j,k,jq) = wrk3(i,j,k)*psix_horz(i,j,jq)*tmaskj
+              psiy(i,j,k,ip) = wrk3(i,j,k)*psiy_horz(i,j,ip)*tmaski
+           enddo
+        enddo
+     enddo
+  enddo
+
+  call mpp_update_domains(psix(:,:,:,:), Dom%domain2d, flags=SUPDATE+WUPDATE) 
+  call mpp_update_domains(psiy(:,:,:,:), Dom%domain2d, flags=SUPDATE+WUPDATE) 
 
 
   ! send diagnostics 
@@ -2352,7 +2386,7 @@ subroutine compute_submeso_skewsion(Thickness, Dens, Time, T_prog)
 
      ! tracer tendency (units rho*dzt * tracer concentration/sec)
      T_prog(n)%wrk1 = 0.0
-     do k=1,nk
+    do k=1,min(maxval(kblt)+1,nk)
         do j=jsc,jec
            do i=isc,iec
               T_prog(n)%wrk1(i,j,k) = Grd%tmask(i,j,k)*(flux_z(i,j,k-1)-flux_z(i,j,k)           &
@@ -2365,6 +2399,9 @@ subroutine compute_submeso_skewsion(Thickness, Dens, Time, T_prog)
 
      if(id_submeso(n) > 0) then
         call diagnose_3d(Time, Grd, id_submeso(n), T_prog(n)%wrk1(:,:,:)*T_prog(n)%conversion)
+     endif
+     if(id_submeso_on_nrho(n) > 0) then
+        call diagnose_3d_rho(Time, Dens, id_submeso_on_nrho(n), T_prog(n)%wrk1*T_prog(n)%conversion)
      endif
 
   enddo ! enddo for n=1,num_prog_tracers
@@ -2405,6 +2442,7 @@ subroutine compute_submeso_skewsion(Thickness, Dens, Time, T_prog)
   endif
 
   call transport_on_nrho_submeso(Time, Dens,-1.0*wrk1_v(:,:,:,1),-1.0*wrk1_v(:,:,:,2))  
+  call transport_on_rho_submeso(Time, Dens,-1.0*wrk1_v(:,:,:,1),-1.0*wrk1_v(:,:,:,2))
 
   if(diagnose_eta_tend_submeso_flx) then 
       call diagnose_eta_tend_3dflux (Time, Thickness, Dens,&
@@ -2449,10 +2487,10 @@ subroutine compute_flux_x(Time,n,Tracer)
   integer :: ip, kr
   real    :: tensor_13(isd:ied,jsd:jed,0:1)
   real    :: sumz(isd:ied,jsd:jed,0:1)
-
   flux_x = 0.0
 
-  do k=1,nk
+
+  do k=1,min(maxval(kblt(isc-1:iec,jsc:jec)),nk) ! Only need to compute in surface layer
 
      ! tracer-independent part of the calculation 
      tensor_13(:,:,:) = 0.0
@@ -2566,7 +2604,7 @@ subroutine compute_flux_y(Time,n,Tracer)
 
   flux_y = 0.0
 
-  do k=1,nk
+  do k=1,min(maxval(kblt(isc:iec,jsc-1:jec))+1,nk) ! Only need to compute in surface layer
 
      ! tracer-independent part of the calculation 
      tensor_23(:,:,:) = 0.0
@@ -2687,7 +2725,7 @@ subroutine compute_flux_z(Time,n,Tracer)
   temparray31 = 0.0
   temparray32 = 0.0
 
-  do k=1,nk-1
+  do k=1,min(maxval(kblt(isc-1:iec,jsc-1:jec)),nk-1) ! Only need to compute in surface layer
 
      do ip=0,1
         jq=ip  
@@ -2814,9 +2852,10 @@ end subroutine compute_flux_z
 !
 ! </DESCRIPTION>
 !
-subroutine compute_submeso_upwind(Time, T_prog)
+subroutine compute_submeso_upwind(Time, Dens, T_prog)
 
   type(ocean_time_type),        intent(in)    :: Time
+  type(ocean_density_type),     intent(in)    :: Dens
   type(ocean_prog_tracer_type), intent(inout) :: T_prog(:)
 
   real,dimension(isc:iec,jsc:jec) :: ft1
@@ -2946,6 +2985,9 @@ subroutine compute_submeso_upwind(Time, T_prog)
      if(id_submeso(n) > 0) then 
         call diagnose_3d(Time, Grd, id_submeso(n), -advect_tendency(:,:,:)*T_prog(n)%conversion)
      endif
+     if(id_submeso_on_nrho(n) > 0) then
+        call diagnose_3d_rho(Time, Dens, id_submeso_on_nrho(n), -advect_tendency*T_prog(n)%conversion)
+     endif
 
 
   enddo ! end of tracer n-loop
@@ -2968,10 +3010,11 @@ end subroutine compute_submeso_upwind
 !
 ! </DESCRIPTION>
 !
-subroutine compute_submeso_sweby(Thickness, Time, T_prog)
+subroutine compute_submeso_sweby(Thickness, Time, Dens, T_prog)
 
   type(ocean_thickness_type),   intent(in)    :: Thickness
   type(ocean_time_type),        intent(in)    :: Time
+  type(ocean_density_type),     intent(in)    :: Dens
   type(ocean_prog_tracer_type), intent(inout) :: T_prog(:)
 
   real,dimension(isc:iec,jsc:jec) :: ftp
@@ -3261,6 +3304,10 @@ subroutine compute_submeso_sweby(Thickness, Time, T_prog)
      
      if(id_submeso(n) > 0) then
         call diagnose_3d(Time, Grd, id_submeso(n), T_prog(n)%wrk1(:,:,:)*T_prog(n)%conversion)
+     endif
+
+     if(id_submeso_on_nrho(n) > 0) then
+        call diagnose_3d_rho(Time, Dens, id_submeso_on_nrho(n), T_prog(n)%wrk1*T_prog(n)%conversion)
      endif
 
 
@@ -3578,6 +3625,8 @@ subroutine transport_on_nrho_submeso (Time, Dens, tx_trans_lev, ty_trans_lev)
   integer :: i, j, k, k_rho, neutralrho_nk
   real    :: work(isd:ied,jsd:jed,size(Dens%neutralrho_ref),2)
   real    :: W1, W2
+  real, dimension(jsc:jec) :: nrho_minj, nrho_maxj
+  real                     :: nrho_min, nrho_max
 
   if (.not.module_is_initialized) then 
     call mpp_error(FATAL, &
@@ -3597,17 +3646,28 @@ subroutine transport_on_nrho_submeso (Time, Dens, tx_trans_lev, ty_trans_lev)
       ! since the initial value for work is 0.
 
       ! interpolate trans_lev from k-levels to neutralrho_nk-levels
-      do k_rho=1,neutralrho_nk
-         do k=1,nk-1
-            do j=jsc,jec
-               do i=isc,iec
-                  if(     Dens%neutralrho_ref(k_rho) >  Dens%neutralrho(i,j,k)  ) then
-                      if( Dens%neutralrho_ref(k_rho) <= Dens%neutralrho(i,j,k+1)) then 
-                          W1= Dens%neutralrho_ref(k_rho)- Dens%neutralrho(i,j,k)
-                          W2= Dens%neutralrho(i,j,k+1)  - Dens%neutralrho_ref(k_rho)
-                          work(i,j,k_rho,1) = (tx_trans_lev(i,j,k+1)*W1 +tx_trans_lev(i,j,k)*W2) &
+      do k = 1,nk-1
+         do j = jsc,jec
+            nrho_maxj(j) = maxval(Dens%neutralrho(isc:iec,j,k+1),mask=Grd%tmask(isc:iec,j,k+1)==1.)
+            nrho_minj(j) = minval(Dens%neutralrho(isc:iec,j,k),mask=Grd%tmask(isc:iec,j,k)==1.)
+         enddo
+         nrho_max = maxval(nrho_maxj)
+         nrho_min = minval(nrho_minj)
+         if (nrho_max == -huge(nrho_max)) exit  ! only rock below this level
+         do k_rho = 1,neutralrho_nk
+            if (nrho_max < Dens%neutralrho_ref(k_rho)) cycle
+            if (nrho_min > Dens%neutralrho_ref(k_rho)) cycle
+            do j = jsc,jec
+               if (nrho_maxj(j) < Dens%neutralrho_ref(k_rho)) cycle
+               if (nrho_minj(j) > Dens%neutralrho_ref(k_rho)) cycle
+               do i = isc,iec
+                  if (    Dens%neutralrho_ref(k_rho) >  Dens%neutralrho(i,j,k)  ) then
+                      if (Dens%neutralrho_ref(k_rho) <= Dens%neutralrho(i,j,k+1)) then 
+                         W1 = Dens%neutralrho_ref(k_rho)- Dens%neutralrho(i,j,k)
+                         W2 = Dens%neutralrho(i,j,k+1)  - Dens%neutralrho_ref(k_rho)
+                         work(i,j,k_rho,1) = (tx_trans_lev(i,j,k+1)*W1 +tx_trans_lev(i,j,k)*W2) &
                                               /(W1 + W2 + epsln)
-                          work(i,j,k_rho,2) = (ty_trans_lev(i,j,k+1)*W1 +ty_trans_lev(i,j,k)*W2) &
+                         work(i,j,k_rho,2) = (ty_trans_lev(i,j,k+1)*W1 +ty_trans_lev(i,j,k)*W2) &
                                               /(W1 + W2 + epsln)
                       endif
                   endif
@@ -3616,9 +3676,9 @@ subroutine transport_on_nrho_submeso (Time, Dens, tx_trans_lev, ty_trans_lev)
          enddo
       enddo
 
-      do k_rho=1,neutralrho_nk
-         do j=jsc,jec
-            do i=isc,iec
+      do k_rho = 1,neutralrho_nk
+         do j = jsc,jec
+            do i = isc,iec
                work(i,j,k_rho,1) = work(i,j,k_rho,1)*Grd%tmask(i,j,1)
                work(i,j,k_rho,2) = work(i,j,k_rho,2)*Grd%tmask(i,j,1)
             enddo
@@ -3639,6 +3699,114 @@ subroutine transport_on_nrho_submeso (Time, Dens, tx_trans_lev, ty_trans_lev)
 end subroutine transport_on_nrho_submeso
 ! </SUBROUTINE> NAME="transport_on_nrho_submeso"
 
+
+!#######################################################################
+! <SUBROUTINE NAME="transport_on_rho_submeso">
+!
+! <DESCRIPTION>
+! Classify horizontal submeso mass transport according to potential
+! density classes. 
+!
+! NOTE: This diagnostic works with transport integrated from bottom to 
+! a particular cell depth. To get transport_on_rho_submeso, a remapping is 
+! performed, rather than the binning done for transport_on_nrho_submeso_adv.
+!
+! This is the same algorithm as used for GM skew fluxes on rho surfaces. 
+!
+! Caveat: Since the submeso scheme operates only in the mixed layer,
+! there are difficulties mapping this transport to potential density 
+! layers.  The user should be mindful of the problems with this 
+! remapping.  An alternative that may be more suitable is to use 
+! Ferret to remap the time mean submeso transport to the time mean
+! potential density surfaces.  There are missing correlations, but for
+! many purposes, the Ferret remapping may be preferable.  
+!
+! </DESCRIPTION>
+!
+subroutine transport_on_rho_submeso (Time, Dens, tx_trans_lev, ty_trans_lev)
+
+  type(ocean_time_type),        intent(in) :: Time
+  type(ocean_density_type),     intent(in) :: Dens
+  real, dimension(isd:,jsd:,:), intent(in) :: tx_trans_lev
+  real, dimension(isd:,jsd:,:), intent(in) :: ty_trans_lev
+  type(time_type)                          :: next_time
+
+  integer :: i, j, k, k_rho, potrho_nk
+  real    :: work(isd:ied,jsd:jed,size(Dens%potrho_ref),2)
+  real    :: W1, W2
+  real, dimension(jsc:jec) :: rho_minj, rho_maxj
+  real                     :: rho_min, rho_max
+
+  if (.not.module_is_initialized) then
+    call mpp_error(FATAL, &
+    '==>Error transport_on_rho_submeso (transport_on_rho_submeso): module needs initialization ')
+  endif
+
+  next_time = increment_time(Time%model_time, int(dtime), 0)
+
+  if (need_data(id_tx_trans_rho_submeso,next_time) .or. need_data(id_ty_trans_rho_submeso,next_time)) then
+
+      potrho_nk = size(Dens%potrho_ref(:))
+      work(:,:,:,:) = 0.0
+
+      ! for (i,j) points with potrho_ref < potrho(k=1),   work=0
+      ! for (i,j) points with potrho_ref > potrho(k=kmt), work=0
+      ! these assumptions mean there is no need to specially handle the endpoints,
+      ! since the initial value for work is 0.
+
+      ! interpolate trans_lev from k-levels to potrho_nk-levels
+      do k = 1,nk-1
+         do j = jsc,jec
+            rho_maxj(j) = maxval(Dens%potrho(isc:iec,j,k+1),mask=Grd%tmask(isc:iec,j,k+1)==1.)
+            rho_minj(j) = minval(Dens%potrho(isc:iec,j,k),mask=Grd%tmask(isc:iec,j,k)==1.)
+         enddo
+         rho_max = maxval(rho_maxj)
+         rho_min = minval(rho_minj)
+         if (rho_max == -huge(rho_max)) exit  ! only rock below this level
+         do k_rho = 1,potrho_nk
+            if (rho_max < Dens%potrho_ref(k_rho)) cycle
+            if (rho_min > Dens%potrho_ref(k_rho)) cycle
+            do j = jsc,jec
+               if (rho_maxj(j) < Dens%potrho_ref(k_rho)) cycle
+               if (rho_minj(j) > Dens%potrho_ref(k_rho)) cycle
+               do i = isc,iec
+                  if (    Dens%potrho_ref(k_rho) >  Dens%potrho(i,j,k)  ) then
+                      if (Dens%potrho_ref(k_rho) <= Dens%potrho(i,j,k+1)) then
+                         W1 = Dens%potrho_ref(k_rho)- Dens%potrho(i,j,k)
+                         W2 = Dens%potrho(i,j,k+1)  - Dens%potrho_ref(k_rho)
+                         work(i,j,k_rho,1) = (tx_trans_lev(i,j,k+1)*W1 +tx_trans_lev(i,j,k)*W2) &
+                                              /(W1 + W2 + epsln)
+                         work(i,j,k_rho,2) = (ty_trans_lev(i,j,k+1)*W1 +ty_trans_lev(i,j,k)*W2) &
+                                              /(W1 + W2 + epsln)
+                      endif
+                  endif
+               enddo
+            enddo
+         enddo
+      enddo
+
+      do k_rho = 1,potrho_nk
+         do j = jsc,jec
+            do i = isc,iec
+               work(i,j,k_rho,1) = work(i,j,k_rho,1)*Grd%tmask(i,j,1)
+               work(i,j,k_rho,2) = work(i,j,k_rho,2)*Grd%tmask(i,j,1)
+            enddo
+         enddo
+      enddo
+
+      if (id_tx_trans_rho_submeso > 0) then
+          used = send_data (id_tx_trans_rho_submeso, work(:,:,:,1), Time%model_time, &
+                 is_in=isc, js_in=jsc, ks_in=1, ie_in=iec, je_in=jec, ke_in=potrho_nk)
+      endif
+      if (id_ty_trans_rho_submeso > 0) then
+          used = send_data (id_ty_trans_rho_submeso, work(:,:,:,2), Time%model_time, &
+                 is_in=isc, js_in=jsc, ks_in=1, ie_in=iec, je_in=jec, ke_in=potrho_nk)
+      endif
+
+  endif
+
+end subroutine transport_on_rho_submeso
+! </SUBROUTINE> NAME="transport_on_rho_submeso"
 
 
 !#######################################################################
@@ -3677,27 +3845,27 @@ subroutine transport_on_nrho_submeso_adv (Time, Dens, utrans, vtrans)
       work1(:,:,:) = 0.0
       work2(:,:,:) = 0.0
 
-      do k_rho=1,neutralrho_nk
+      do k_rho = 1,neutralrho_nk
 
          tmp(:,:,:) = 0.0
-         do k=1,nk
-            do j=jsc,jec
-               do i=isc,iec
+         do k = 1,nk
+            do j = jsc,jec
+               do i = isc,iec
                   if (k_rho == 1) then
-                     if(Dens%neutralrho(i,j,k) < Dens%neutralrho_bounds(k_rho)) then 
+                     if (Dens%neutralrho(i,j,k) < Dens%neutralrho_bounds(k_rho+1)) then 
                          tmp(1,i,j) = tmp(1,i,j) + utrans(i,j,k)
                          tmp(2,i,j) = tmp(2,i,j) + vtrans(i,j,k)
                      endif
-                  elseif(k_rho < neutralrho_nk) then
-                     if( (Dens%neutralrho_bounds(k_rho) <= Dens%neutralrho(i,j,k)) .and.  &
+                  elseif (k_rho < neutralrho_nk) then
+                     if ((Dens%neutralrho_bounds(k_rho) <= Dens%neutralrho(i,j,k)) .and.  &
                          (Dens%neutralrho(i,j,k)        <  Dens%neutralrho_bounds(k_rho+1)) ) then 
                            tmp(1,i,j) = tmp(1,i,j) + utrans(i,j,k)
                            tmp(2,i,j) = tmp(2,i,j) + vtrans(i,j,k)
                      endif
                   else    ! if (k_rho == neutralrho_nk) then
-                     if(Dens%neutralrho_bounds(k_rho) <= Dens%neutralrho(i,j,k)) then 
-                         tmp(1,i,j) = tmp(1,i,j) + utrans(i,j,k)             
-                         tmp(2,i,j) = tmp(2,i,j) + vtrans(i,j,k)
+                     if (Dens%neutralrho_bounds(k_rho) <= Dens%neutralrho(i,j,k)) then 
+                        tmp(1,i,j) = tmp(1,i,j) + utrans(i,j,k)             
+                        tmp(2,i,j) = tmp(2,i,j) + vtrans(i,j,k)
                      endif
                   endif
                enddo
@@ -3753,6 +3921,12 @@ subroutine watermass_diag_init(Time, Dens)
     'update of locally referenced potential density from submeso param',       &
     '(kg/m^3)/sec', missing_value=missing_value, range=(/-1.e10,1.e10/))
   if(id_neut_rho_submeso > 0) compute_watermass_diag = .true.
+
+  id_pot_rho_submeso = register_diag_field ('ocean_model', 'pot_rho_submeso',&
+    Grd%tracer_axes(1:3), Time%model_time,                                   &
+    'update of depth referenced potential density from submeso param',       &
+    '(kg/m^3)/sec', missing_value=missing_value, range=(/-1.e10,1.e10/))
+  if(id_pot_rho_submeso > 0) compute_watermass_diag = .true.
 
   id_wdian_rho_submeso = register_diag_field ('ocean_model', 'wdian_rho_submeso',&
     Grd%tracer_axes(1:3), Time%model_time,                                       &
@@ -4086,6 +4260,7 @@ subroutine watermass_diag(Time, T_prog, Dens)
   call diagnose_3d_rho(Time, Dens, id_wdian_rho_submeso_on_nrho, wrk3)
   call diagnose_3d_rho(Time, Dens, id_tform_rho_submeso_on_nrho, wrk4)
 
+
   ! sea level tendency 
   if(id_eta_tend_submeso_tend > 0 .or. id_eta_tend_submeso_tend_glob > 0) then
       eta_tend(:,:) = 0.0
@@ -4100,6 +4275,23 @@ subroutine watermass_diag(Time, T_prog, Dens)
       call diagnose_sum(Time, Grd, Dom, id_eta_tend_submeso_tend_glob, eta_tend, cellarea_r)
   endif
 
+
+  ! potential rho related diagnostics
+  if(id_pot_rho_submeso > 0) then 
+     wrk1(:,:,:) = 0.0
+     wrk2(:,:,:) = 0.0
+     do k=1,nk
+        do j=jsc,jec
+           do i=isc,iec
+              wrk1(i,j,k) = Dens%dpotrhodT(i,j,k)*T_prog(index_temp)%wrk1(i,j,k) &
+                           +Dens%dpotrhodS(i,j,k)*T_prog(index_salt)%wrk1(i,j,k)
+              wrk2(i,j,k) = wrk1(i,j,k)*Dens%rho_dztr_tau(i,j,k)
+           enddo
+        enddo
+     enddo
+     call diagnose_3d(Time, Grd, id_pot_rho_submeso, wrk2(:,:,:))
+  endif
+  
 
   ! temp related diagnostics 
   wrk1(:,:,:) = 0.0

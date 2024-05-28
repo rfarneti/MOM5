@@ -203,8 +203,10 @@ module flux_exchange_mod
 
   use sat_vapor_pres_mod, only: compute_qs
 
-  use      constants_mod, only: rdgas, rvgas, cp_air, stefan, WTMAIR, HLV, HLF, Radius, PI, CP_OCEAN, &
+  use      constants_mod, only: rdgas, rvgas, cp_air, stefan, WTMAIR, HLV, HLF, Radius, PI, &
                                 WTMCO2, WTMC
+
+  use ocean_parameters_mod, only: cp_ocean
 
 !Balaji
 !utilities stuff into use fms_mod
@@ -427,9 +429,10 @@ real, dimension(3) :: ccc ! for conservation checks
 !  DIRECT: same physical grid, same domain decomposition, can directly copy data
 integer, parameter :: REGRID=1, REDIST=2, DIRECT=3
 !Balaji: clocks moved into flux_exchange
-  integer :: cplClock, sfcClock, fluxAtmDnClock, fluxLandIceClock, &
-             fluxIceOceanClock, fluxOceanIceClock, regenClock, fluxAtmUpClock, &
-             cplOcnClock
+!RASF Initialise to zero irrespective  of model component
+  integer :: cplClock=0, sfcClock=0, fluxAtmDnClock=0, fluxLandIceClock=0, &
+             fluxIceOceanClock=0, fluxOceanIceClock=0, regenClock=0, fluxAtmUpClock=0, &
+             cplOcnClock=0
 
   logical :: ocn_pe, ice_pe
   integer, allocatable, dimension(:) :: ocn_pelist, ice_pelist
@@ -1036,6 +1039,7 @@ subroutine flux_exchange_init ( Time, Atm, Land, Ice, Ocean, Ocean_state,&
     allocate( ice_ocean_boundary%calving_hflx  (is:ie,js:je) ) ; ice_ocean_boundary%calving_hflx = 0.0
     allocate( ice_ocean_boundary%p        (is:ie,js:je) ) ; ice_ocean_boundary%p = 0.0
     allocate( ice_ocean_boundary%mi       (is:ie,js:je) ) ; ice_ocean_boundary%mi = 0.0
+    allocate( ice_ocean_boundary%wnd      (is:ie,js:je) ) ;         ice_ocean_boundary%wnd = 0.0
 
 !
 ! allocate fields for extra tracers
@@ -1785,6 +1789,8 @@ subroutine sfc_boundary_layer ( dt, Time, Atm, Land, Ice, Land_Ice_Atmos_Boundar
   endif
 #endif
 
+! place the wind value onto the ice data type.  mac ! Check  RASF
+  call get_from_xgrid (Ice%wnd, 'OCN', ex_u10, xmap_sfc)
   !=======================================================================
   ! [7] diagnostics section
 
@@ -2775,6 +2781,7 @@ subroutine flux_ice_to_ocean ( Time, Ice, Ocean, Ice_Ocean_Boundary )
 !                                         runoff_ocean,  calving_ocean, &
 !                                         flux_salt_ocean, p_surf_ocean
   type(ice_ocean_boundary_type), intent(inout) :: Ice_Ocean_Boundary
+  real, dimension(:,:), pointer                :: dummy_null_pointer => NULL() !  RASF hack to get around pointer association.
 
   integer       :: m
   integer       :: n
@@ -2850,6 +2857,16 @@ subroutine flux_ice_to_ocean ( Time, Ice, Ocean, Ice_Ocean_Boundary )
   if(ASSOCIATED(Ice_Ocean_Boundary%q_flux) ) call flux_ice_to_ocean_redistribute( Ice, Ocean, &
       Ice%flux_q, Ice_Ocean_Boundary%q_flux, Ice_Ocean_Boundary%xtype, do_area_weighted_flux )
 
+  if(ASSOCIATED(Ice_Ocean_Boundary%wnd) ) then
+     if(ASSOCIATED(Ice%wnd)) then
+        call flux_ice_to_ocean_redistribute( Ice, Ocean, &
+           Ice%wnd(:,:,1), Ice_Ocean_Boundary%wnd, Ice_Ocean_Boundary%xtype, do_area_weighted_flux )
+     else
+        call flux_ice_to_ocean_redistribute( Ice, Ocean, &
+          dummy_null_pointer, Ice_Ocean_Boundary%wnd, Ice_Ocean_Boundary%xtype, do_area_weighted_flux ) !Put dummy array here.
+     endif
+  endif
+
 !Balaji: moved data_override calls here from coupler_main
   if( ocn_pe )then
       call mpp_set_current_pelist(ocn_pelist)
@@ -2857,6 +2874,7 @@ subroutine flux_ice_to_ocean ( Time, Ice, Ocean, Ice_Ocean_Boundary )
       call data_override('OCN', 'v_flux',    Ice_Ocean_Boundary%v_flux   , Time )
       call data_override('OCN', 't_flux',    Ice_Ocean_Boundary%t_flux   , Time )
       call data_override('OCN', 'q_flux',    Ice_Ocean_Boundary%q_flux   , Time )
+      call data_override('OCN', 'wnd',    Ice_Ocean_Boundary%wnd   , Time )
       call data_override('OCN', 'salt_flux', Ice_Ocean_Boundary%salt_flux, Time )
       call data_override('OCN', 'lw_flux',   Ice_Ocean_Boundary%lw_flux  , Time )
       call data_override('OCN', 'sw_flux_nir_dir',   Ice_Ocean_Boundary%sw_flux_nir_dir  , Time )
@@ -2916,7 +2934,7 @@ subroutine flux_ice_to_ocean ( Time, Ice, Ocean, Ice_Ocean_Boundary )
 !        t_surf = surface temperature (deg K)
 !        frazil = frazil (???)
 !        u_surf = zonal ocean current/ice motion (m/s)
-!        v_surf = meridional ocean current/ice motion (m/s
+!        v_surf = meridional ocean current/ice motion (m/s)
 !  </PRE>
 !  </DESCRIPTION>
 !  <TEMPLATE>
