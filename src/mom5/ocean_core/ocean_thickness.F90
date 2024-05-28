@@ -4106,7 +4106,8 @@ end subroutine thickness_chksum
 ! Author: Stephen.Griffies
 !
 ! Updated Oct 2009 to be more vectorized 
-! from ocean_tracer_diag.F90
+!         May 2024 diagnostic created as in
+!                  ocean_tracer_diag.F90
 !
 ! </DESCRIPTION>
 !
