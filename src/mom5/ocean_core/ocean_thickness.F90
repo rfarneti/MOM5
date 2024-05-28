@@ -162,7 +162,7 @@ module ocean_thickness_mod
 ! </NAMELIST>
 !
 use constants_mod,     only: epsln, c2dbars
-use diag_manager_mod,  only: register_diag_field, register_static_field
+use diag_manager_mod,  only: register_diag_field, register_static_field, send_data, need_data
 use fms_mod,           only: write_version_number, error_mesg, FATAL, WARNING
 use fms_mod,           only: read_data
 use fms_mod,           only: open_namelist_file, close_file, check_nml_error, file_exist
@@ -170,7 +170,9 @@ use fms_io_mod,        only: register_restart_field, save_restart, restore_state
 use fms_io_mod,        only: restart_file_type, reset_field_pointer 
 use mpp_domains_mod,   only: mpp_update_domains, mpp_global_min, mpp_global_max, domain2d
 use mpp_mod,           only: input_nml_file, stdout, stdlog, mpp_error, mpp_max, mpp_min, mpp_pe
+use mpp_mod,           only: mpp_clock_id, mpp_clock_begin, mpp_clock_end, CLOCK_ROUTINE
 use mpp_mod,           only: MPP_FILL_DOUBLE
+use time_manager_mod,  only: time_type, increment_time
 
 use ocean_domains_mod,    only: get_local_indices
 use ocean_grids_mod,      only: update_boundaries
@@ -193,6 +195,8 @@ private
 
 #include <ocean_memory.h>
 
+real :: dtts
+
 ! for vertical coordinate choice 
 integer :: vert_coordinate
 integer :: vert_coordinate_class
@@ -207,6 +211,9 @@ integer :: halo
 
 ! to write some output to all processors 
 integer :: unit=6
+
+! for diagnostics clocks 
+integer :: id_diagnose_dzt_on_rho
  
 ! for diagnostics 
 integer :: id_dst              = -1
@@ -287,12 +294,15 @@ real, allocatable, dimension(:) :: rho0_profile
 real, allocatable, dimension(:,:) :: rescale_rho0_mask 
 real, allocatable, dimension(:,:) :: data
 
+! for dzt_on_rho
+integer :: id_dzt_on_rho = -1        
 
 character(len=128) :: version=&
      '$Id: ocean_thickness.F90,v 20.0 2013/12/14 00:12:33 fms Exp $'
 character (len=128) :: tagname = &
      '$Name: tikal $'
 
+type(ocean_grid_type), pointer   :: Grd =>NULL()
 type(ocean_domain_type), pointer :: Dom =>NULL()
 
 public ocean_thickness_init
@@ -313,6 +323,7 @@ private thickness_chksum
 private thickness_chksum_blobs
 private thickness_details 
 private REMAP_ZT_TO_ZU
+private diagnose_dzt_on_rho
 
 logical :: module_is_initialized      = .false.
 logical :: rescale_mass_to_get_ht_mod = .false.
@@ -360,7 +371,7 @@ contains
 ! is preliminary. 
 ! </DESCRIPTION>
 !
-subroutine ocean_thickness_init  (Time, Time_steps, Domain, Grid, Ext_mode, Thickness, &
+subroutine ocean_thickness_init  (Time, Time_steps, Domain, Grid, Ext_mode, Thickness, Dens, &
                                  ver_coordinate, ver_coordinate_class, ver_coordinate_type, &
                                  blobs, introduce_blobs, dtimein, debug)
 
@@ -368,6 +379,7 @@ subroutine ocean_thickness_init  (Time, Time_steps, Domain, Grid, Ext_mode, Thic
   type(ocean_time_steps_type),    intent(in)           :: Time_steps 
   type(ocean_domain_type),        intent(in), target   :: Domain
   type(ocean_grid_type),          intent(inout)        :: Grid  
+  type(ocean_density_type),       intent(inout)        :: Dens
   type(ocean_external_mode_type), intent(in)           :: Ext_mode
   type(ocean_thickness_type),     intent(inout)        :: Thickness
   integer,                        intent(in)           :: ver_coordinate 
@@ -444,6 +456,8 @@ subroutine ocean_thickness_init  (Time, Time_steps, Domain, Grid, Ext_mode, Thic
 
   Dom  => Domain
   halo =  Dom%xhalo   ! (xhalo=yhalo assumed in MOM)
+
+  dtts = Time_steps%dtts
 
   if(enforce_positive_dzt) then 
     write(stdoutunit,'(/a)') '==>Warning: running with enforce_positive_dzt=.true. '
@@ -733,6 +747,15 @@ subroutine ocean_thickness_init  (Time, Time_steps, Domain, Grid, Ext_mode, Thic
   id_geodepth_zt = register_diag_field ('ocean_model', 'geodepth_zt', Grid%tracer_axes(1:3), Time%model_time, &
                                 'ocean t-cell depth relative to z=0', 'm',                                    &
                                  missing_value=missing_value, range=(/-1e1,1.e8/))
+
+  id_dzt_on_rho = register_diag_field ('ocean_model', 'dzt_on_rho', Dens%potrho_axes(1:3),Time%model_time, &
+                                't-cell thickness on potential density surface', 'm',                                  &
+                                missing_value=missing_value, range=(/-1e1,1e5/))
+
+  ! set ids for clocks
+  id_diagnose_dzt_on_rho     = mpp_clock_id('(Ocean thickness: dzt on rho)',grain=CLOCK_ROUTINE)
+
+
   if (use_blobs) then
      id_geodepth_zwt = register_diag_field ('ocean_model', 'geodepth_zwt', Grid%tracer_axes(1:3), Time%model_time, &
                                             'ocean bottom of t-cell depth relative to z=0', 'm',                   &
@@ -1477,7 +1500,7 @@ subroutine ocean_thickness_init_adjust(Grid, Time, Dens, Ext_mode, Thickness)
 
   type(ocean_grid_type),          intent(inout)  :: Grid  
   type(ocean_time_type),          intent(in)     :: Time
-  type(ocean_density_type),       intent(in)     :: Dens 
+  type(ocean_density_type),       intent(inout)  :: Dens 
   type(ocean_external_mode_type), intent(inout)  :: Ext_mode
   type(ocean_thickness_type),     intent(inout)  :: Thickness
 
@@ -3113,8 +3136,10 @@ subroutine update_tcell_thickness (Time, Grid, Ext_mode, Dens, Thickness)
   type(ocean_time_type),          intent(in)    :: Time
   type(ocean_grid_type),          intent(in)    :: Grid  
   type(ocean_external_mode_type), intent(in)    :: Ext_mode
-  type(ocean_density_type),       intent(in)    :: Dens 
+  type(ocean_density_type),       intent(inout) :: Dens 
   type(ocean_thickness_type),     intent(inout) :: Thickness
+
+  type(time_type) :: next_time
 
   integer :: i, j, k, kb
   integer :: tau, taup1
@@ -3130,6 +3155,8 @@ subroutine update_tcell_thickness (Time, Grid, Ext_mode, Dens, Thickness)
   tau   = Time%tau
   taup1 = Time%taup1
   huge_undulations=.false.
+
+  next_time = increment_time(Time%model_time, int(dtts), 0)
 
   ! write tau values of the vertical grid increments before update to taup1 
   call diagnose_3d(Time, Grid, id_dst, Thickness%dst(:,:,:))
@@ -3170,6 +3197,13 @@ subroutine update_tcell_thickness (Time, Grid, Ext_mode, Dens, Thickness)
       enddo
       call diagnose_3d(Time, Grid, id_mass_t, wrk1(:,:,:))
   endif
+
+  ! compute dzt as function of potential density 
+  call mpp_clock_begin(id_diagnose_dzt_on_rho)
+     if(need_data(id_dzt_on_rho, next_time)) then
+         call diagnose_dzt_on_rho(Time, Dens, Thickness)
+     endif
+  call mpp_clock_end(id_diagnose_dzt_on_rho)
 
 
   ! update coordinate increments for GEOPOTENTIAL and PRESSURE.
@@ -3543,6 +3577,7 @@ subroutine update_ucell_thickness (Time, Grid, Ext_mode, Thickness)
      call diagnose_2d_u(Time, Grid, id_mass_u, Thickness%mass_u(:,:,tau))
      call diagnose_2d_en(Time, Grid, id_mass_en(1), id_mass_en(2), Thickness%mass_en(:,:,:))
   endif
+
 
   call diagnose_3d(Time, Grid, id_dzten(1), Thickness%dzten(:,:,:,1))
   call diagnose_3d(Time, Grid, id_dzten(2), Thickness%dzten(:,:,:,2))
@@ -4060,6 +4095,98 @@ subroutine thickness_chksum(Time, Grid, Thickness)
   
 end subroutine thickness_chksum
 ! </SUBROUTINE> NAME="thickness_chksum"
+
+
+!#######################################################################
+! <SUBROUTINE NAME="diagnose_dzt_on_rho">
+! <DESCRIPTION>
+! Diagnose thickness dzt on potential density surface. 
+! Method based on diagnose_depth_of_potrho diagnostic.
+!
+! Author: Stephen.Griffies
+!
+! Updated Oct 2009 to be more vectorized 
+! from ocean_tracer_diag.F90
+!
+! </DESCRIPTION>
+!
+subroutine diagnose_dzt_on_rho(Time, Dens, Thickness)
+
+  type(ocean_time_type),        intent(in) :: Time
+  type(ocean_density_type),     intent(in) :: Dens
+  type(ocean_thickness_type),   intent(in) :: Thickness
+
+  real      :: W1, W2
+  integer   :: potrho_nk
+  integer   :: i, j, k, k_rho, tau
+  real, dimension(isd:ied,jsd:jed,size(Dens%potrho_ref(:))) :: dzt_on_rho
+! real      :: work1(isc:iec,jsc:jec,size(Dens%potrho_ref(:)))
+  real, dimension(jsc:jec) :: rho_minj,rho_maxj
+  real                     :: rho_min,rho_max
+
+  potrho_nk = size(Dens%potrho_ref(:))
+  
+  if (.not. module_is_initialized) then
+      call mpp_error(FATAL, &
+      '==>Error from ocean_thickness (diagnose_dzt_on_rho): module needs initialization')
+  endif
+  
+
+
+  dzt_on_rho(:,:,:) = 0.0
+
+  ! for (i,j) points with potrho_ref < potrho(k=1),   keep dzt_on_rho=0
+  ! for (i,j) points with potrho_ref > potrho(k=kmt), keep dzt_on_rho=0
+  ! these assumptions mean there is no need to specially handle the endpoints,
+  ! since the initial value for dzt_on_rho is 0.
+ 
+  ! interpolate thickness field onto rho-surface 
+ 
+  do k = 1,nk-1
+     do j = jsc,jec
+        rho_maxj(j) = maxval(Dens%potrho(isc:iec,j,k+1),mask=Grd%tmask(isc:iec,j,k+1)==1.)
+        rho_minj(j) = minval(Dens%potrho(isc:iec,j,k),mask=Grd%tmask(isc:iec,j,k)==1.)
+     enddo
+     rho_max = maxval(rho_maxj)
+     rho_min = minval(rho_minj)
+     if (rho_max == -huge(rho_max)) exit  ! only rock below this level
+     do k_rho = 1,potrho_nk
+        if (rho_max < Dens%potrho_ref(k_rho)) cycle
+        if (rho_min > Dens%potrho_ref(k_rho)) cycle
+        do j = jsc,jec
+           if (rho_maxj(j) < Dens%potrho_ref(k_rho)) cycle
+           if (rho_minj(j) > Dens%potrho_ref(k_rho)) cycle
+           do i=isc,iec
+              if(     Dens%potrho_ref(k_rho) >  Dens%potrho(i,j,k)  ) then
+                  if( Dens%potrho_ref(k_rho) <= Dens%potrho(i,j,k+1)) then
+                      W1= Dens%potrho_ref(k_rho)- Dens%potrho(i,j,k)
+                      W2= Dens%potrho(i,j,k+1)  - Dens%potrho_ref(k_rho)
+                      dzt_on_rho(i,j,k_rho) = ( Thickness%dzt(i,j,k+1)*W1   &
+                                               +Thickness%dzt(i,j,k)  *W2)  &
+                                               /(W1 + W2 + epsln)
+                  endif
+              endif
+           enddo
+        enddo
+     enddo
+  enddo
+ 
+  ! ensure masking is applied to interpolated field 
+  do k_rho = 1,potrho_nk
+     do j = jsc,jec
+        do i = isc,iec
+           dzt_on_rho(i,j,k_rho) = dzt_on_rho(i,j,k_rho)*Grd%tmask(i,j,1)
+        enddo
+     enddo
+  enddo
+ 
+  used = send_data (id_dzt_on_rho, dzt_on_rho(:,:,:), &
+                    Time%model_time,                  &
+                    is_in=isc, js_in=jsc, ks_in=1, ie_in=iec, je_in=jec, ke_in=potrho_nk)
+
+
+end subroutine diagnose_dzt_on_rho
+! </SUBROUTINE> NAME="diagnose_dzt_on_rho"
 
 
 !#######################################################################
